@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+LOG_DIR="${PROJECT_ROOT}/integration/logs"
+RUN_ID="$(date +%Y%m%d_%H%M%S)"
+MOCK_LOG="${LOG_DIR}/mock_${RUN_ID}.log"
+TRINO_LOG="${LOG_DIR}/trino_${RUN_ID}.log"
+
+TRINO_HOME="${TRINO_HOME:-/Users/dlambrig/trino}"
+TRINO_ETC="${TRINO_ETC:-${TRINO_HOME}/etc}"
+TRINO_SERVER_URL="${TRINO_SERVER_URL:-http://localhost:8080}"
+
+TRINO_SERVER_DIR="${TRINO_SERVER_DIR:-}"
+if [[ -z "${TRINO_SERVER_DIR}" ]]; then
+  TRINO_SERVER_DIR="$(ls -d "${TRINO_HOME}"/core/trino-server/target/trino-server-* 2>/dev/null | head -n1 || true)"
+fi
+
+TRINO_LAUNCHER="${TRINO_LAUNCHER:-}"
+if [[ -z "${TRINO_LAUNCHER}" ]]; then
+  if [[ -x "${TRINO_SERVER_DIR}/bin/darwin-amd64/launcher" ]]; then
+    TRINO_LAUNCHER="${TRINO_SERVER_DIR}/bin/darwin-amd64/launcher"
+  elif [[ -x "${TRINO_SERVER_DIR}/bin/linux-amd64/launcher" ]]; then
+    TRINO_LAUNCHER="${TRINO_SERVER_DIR}/bin/linux-amd64/launcher"
+  elif [[ -x "${TRINO_SERVER_DIR}/bin/launcher" ]]; then
+    TRINO_LAUNCHER="${TRINO_SERVER_DIR}/bin/launcher"
+  fi
+fi
+
+TRINO_CLI_JAR="${TRINO_CLI_JAR:-}"
+if [[ -z "${TRINO_CLI_JAR}" ]]; then
+  TRINO_CLI_JAR="$(ls "${TRINO_HOME}"/client/trino-cli/target/trino-cli-*-executable.jar 2>/dev/null | head -n1 || true)"
+fi
+
+if [[ -z "${TRINO_SERVER_DIR}" || ! -d "${TRINO_SERVER_DIR}" ]]; then
+  echo "ERROR: Unable to find Trino server directory. Set TRINO_SERVER_DIR." >&2
+  exit 1
+fi
+
+if [[ -z "${TRINO_LAUNCHER}" || ! -x "${TRINO_LAUNCHER}" ]]; then
+  echo "ERROR: Unable to find Trino launcher. Set TRINO_LAUNCHER." >&2
+  exit 1
+fi
+
+if [[ -z "${TRINO_CLI_JAR}" || ! -f "${TRINO_CLI_JAR}" ]]; then
+  echo "ERROR: Unable to find trino-cli executable jar. Set TRINO_CLI_JAR." >&2
+  exit 1
+fi
+
+mkdir -p "${LOG_DIR}"
+
+MOCK_PID=""
+TRINO_PID=""
+
+cleanup() {
+  set +e
+  if [[ -n "${TRINO_PID}" ]]; then
+    kill "${TRINO_PID}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${MOCK_PID}" ]]; then
+    kill "${MOCK_PID}" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+wait_for_http() {
+  local url="$1"
+  local name="$2"
+  for _ in {1..120}; do
+    if curl -sf "${url}" >/dev/null 2>&1; then
+      echo "${name} is ready"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "ERROR: Timed out waiting for ${name}" >&2
+  return 1
+}
+
+require_port_free() {
+  local port="$1"
+  local name="$2"
+  local pids
+  pids="$(lsof -ti tcp:"${port}" || true)"
+  if [[ -n "${pids}" ]]; then
+    echo "ERROR: ${name} port ${port} is already in use by PID(s): ${pids}" >&2
+    echo "Stop existing process(es) first, or run: kill ${pids}" >&2
+    exit 1
+  fi
+}
+
+run_sql_raw() {
+  local sql="$1"
+  java -jar "${TRINO_CLI_JAR}" --server "${TRINO_SERVER_URL}" --output-format TSV_HEADER --execute "${sql}"
+}
+
+wait_for_trino() {
+  for _ in {1..120}; do
+    if run_sql_raw "SELECT 1" >/dev/null 2>&1; then
+      echo "Trino is ready"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "ERROR: Timed out waiting for Trino" >&2
+  return 1
+}
+
+run_and_expect() {
+  local name="$1"
+  local sql="$2"
+  local expected="$3"
+
+  echo "==> ${name}"
+  local out
+  if ! out="$(run_sql_raw "${sql}" 2>&1)"; then
+    echo "SQL failed: ${sql}" >&2
+    echo "Output:" >&2
+    echo "${out}" >&2
+    echo "--- MOCK LOG (tail) ---" >&2
+    tail -n 80 "${MOCK_LOG}" >&2 || true
+    echo "--- TRINO LOG (tail) ---" >&2
+    tail -n 80 "${TRINO_LOG}" >&2 || true
+    exit 1
+  fi
+
+  if ! grep -Eq "${expected}" <<<"${out}"; then
+    echo "Assertion failed for: ${name}" >&2
+    echo "Expected pattern: ${expected}" >&2
+    echo "Actual output:" >&2
+    echo "${out}" >&2
+    exit 1
+  fi
+}
+
+require_port_free 8181 "Mock server"
+require_port_free 8080 "Trino server"
+
+echo "Starting mock server..."
+(
+  cd "${PROJECT_ROOT}"
+  ./gradlew runIcebergRestMock
+) >"${MOCK_LOG}" 2>&1 &
+MOCK_PID=$!
+
+wait_for_http "http://localhost:8181/v1/config" "Mock server"
+
+echo "Starting Trino server..."
+"${TRINO_LAUNCHER}" -etc-dir "${TRINO_ETC}" run >"${TRINO_LOG}" 2>&1 &
+TRINO_PID=$!
+
+wait_for_trino
+
+SCHEMA="it_${RUN_ID}"
+TABLE="orders_${RUN_ID}"
+
+run_and_expect "Create schema" \
+  "CREATE SCHEMA IF NOT EXISTS iceberg.${SCHEMA}" \
+  "CREATE SCHEMA"
+
+run_and_expect "Create table" \
+  "CREATE TABLE iceberg.${SCHEMA}.${TABLE} (order_id BIGINT, order_date DATE, amount DOUBLE)" \
+  "CREATE TABLE"
+
+run_and_expect "Insert rows" \
+  "INSERT INTO iceberg.${SCHEMA}.${TABLE} VALUES (1, DATE '2026-03-08', 100.50), (2, DATE '2026-03-09', 42.00)" \
+  "INSERT:"
+
+run_and_expect "Read rows" \
+  "SELECT order_id, amount FROM iceberg.${SCHEMA}.${TABLE} ORDER BY order_id" \
+  $'1\t100\\.5'
+
+run_and_expect "Snapshots metadata" \
+  "SELECT count(*) AS c FROM iceberg.${SCHEMA}.\"${TABLE}\$snapshots\"" \
+  $'c\n[1-9][0-9]*'
+
+run_and_expect "Schema evolution" \
+  "ALTER TABLE iceberg.${SCHEMA}.${TABLE} ADD COLUMN note VARCHAR" \
+  "ADD COLUMN"
+
+run_and_expect "Insert with new column" \
+  "INSERT INTO iceberg.${SCHEMA}.${TABLE} (order_id, order_date, amount, note) VALUES (3, DATE '2026-03-10', 77.25, 'new column test')" \
+  "INSERT:"
+
+run_and_expect "Read evolved schema" \
+  "SELECT order_id, note FROM iceberg.${SCHEMA}.${TABLE} ORDER BY order_id" \
+  "new column test"
+
+echo "Integration tests passed."
+echo "Mock log:  ${MOCK_LOG}"
+echo "Trino log: ${TRINO_LOG}"
