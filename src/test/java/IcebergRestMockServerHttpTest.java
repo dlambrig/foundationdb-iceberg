@@ -174,6 +174,75 @@ class IcebergRestMockServerHttpTest {
     }
 
     @Test
+    void supportsNestedNamespaceListingWithParentFilter() throws Exception {
+        assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}").statusCode);
+        assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\",\"sales\"],\"properties\":{}}").statusCode);
+        assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\",\"finance\"],\"properties\":{}}").statusCode);
+        assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\",\"sales\",\"daily\"],\"properties\":{}}").statusCode);
+
+        HttpResponse response = request("GET", "/v1/namespaces?parent=analytics", null);
+        assertEquals(200, response.statusCode);
+        JsonNode namespaces = MAPPER.readTree(response.body).path("namespaces");
+        assertEquals(2, namespaces.size());
+    }
+
+    @Test
+    void updateNamespacePropertiesWorks() throws Exception {
+        assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{\"owner\":\"data\"}}").statusCode);
+
+        String updateBody = "{\"updates\":{\"tier\":\"gold\"},\"removals\":[\"owner\",\"missing_key\"]}";
+        HttpResponse update = request("POST", "/v1/namespaces/analytics/properties", updateBody);
+        assertEquals(200, update.statusCode);
+        JsonNode updateJson = MAPPER.readTree(update.body);
+        assertEquals(1, updateJson.path("updated").size());
+        assertEquals(1, updateJson.path("removed").size());
+        assertEquals(1, updateJson.path("missing").size());
+
+        HttpResponse getNs = request("GET", "/v1/namespaces/analytics", null);
+        assertEquals(200, getNs.statusCode);
+        JsonNode props = MAPPER.readTree(getNs.body).path("properties");
+        assertEquals("gold", props.path("tier").asText());
+    }
+
+    @Test
+    void deleteTableAndNamespaceLifecycleWorks() throws Exception {
+        assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}").statusCode);
+        String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables", tableBody).statusCode);
+
+        HttpResponse namespaceDeleteConflict = request("DELETE", "/v1/namespaces/analytics", null);
+        assertEquals(409, namespaceDeleteConflict.statusCode);
+
+        HttpResponse deleteTable = request("DELETE", "/v1/namespaces/analytics/tables/orders", null);
+        assertEquals(204, deleteTable.statusCode);
+
+        HttpResponse deleteNamespace = request("DELETE", "/v1/namespaces/analytics", null);
+        assertEquals(204, deleteNamespace.statusCode);
+    }
+
+    @Test
+    void renameTableWorks() throws Exception {
+        assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}").statusCode);
+        String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables", tableBody).statusCode);
+
+        String renameBody = "{\"source\":{\"namespace\":[\"analytics\"],\"name\":\"orders\"},\"destination\":{\"namespace\":[\"analytics\"],\"name\":\"orders_new\"}}";
+        HttpResponse rename = request("POST", "/v1/tables/rename", renameBody);
+        assertEquals(204, rename.statusCode);
+
+        assertEquals(404, request("GET", "/v1/namespaces/analytics/tables/orders", null).statusCode);
+        assertEquals(200, request("GET", "/v1/namespaces/analytics/tables/orders_new", null).statusCode);
+    }
+
+    @Test
+    void stagedCreateDoesNotPersistTable() throws Exception {
+        assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}").statusCode);
+        String stagedBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]},\"stage-create\":true}";
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables", stagedBody).statusCode);
+        assertEquals(404, request("GET", "/v1/namespaces/analytics/tables/orders", null).statusCode);
+    }
+
+    @Test
     void getTableReflectsCommittedMetadataChanges() throws Exception {
         request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
         String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
