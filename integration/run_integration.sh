@@ -133,6 +133,29 @@ run_and_expect() {
   fi
 }
 
+run_and_expect_fail() {
+  local name="$1"
+  local sql="$2"
+  local expected="$3"
+
+  echo "==> ${name}"
+  local out
+  if out="$(run_sql_raw "${sql}" 2>&1)"; then
+    echo "Expected SQL to fail but it succeeded: ${sql}" >&2
+    echo "Output:" >&2
+    echo "${out}" >&2
+    exit 1
+  fi
+
+  if ! grep -Eq "${expected}" <<<"${out}"; then
+    echo "Assertion failed for expected failure: ${name}" >&2
+    echo "Expected error pattern: ${expected}" >&2
+    echo "Actual output:" >&2
+    echo "${out}" >&2
+    exit 1
+  fi
+}
+
 require_port_free 8181 "Mock server"
 require_port_free 8080 "Trino server"
 
@@ -153,6 +176,7 @@ wait_for_trino
 
 SCHEMA="it_${RUN_ID}"
 TABLE="orders_${RUN_ID}"
+RENAMED_TABLE="orders_renamed_${RUN_ID}"
 
 run_and_expect "Create schema" \
   "CREATE SCHEMA IF NOT EXISTS iceberg.${SCHEMA}" \
@@ -185,6 +209,26 @@ run_and_expect "Insert with new column" \
 run_and_expect "Read evolved schema" \
   "SELECT order_id, note FROM iceberg.${SCHEMA}.${TABLE} ORDER BY order_id" \
   "new column test"
+
+run_and_expect "Rename table" \
+  "ALTER TABLE iceberg.${SCHEMA}.${TABLE} RENAME TO iceberg.${SCHEMA}.${RENAMED_TABLE}" \
+  "RENAME TABLE"
+
+run_and_expect "Read renamed table" \
+  "SELECT order_id, note FROM iceberg.${SCHEMA}.${RENAMED_TABLE} ORDER BY order_id" \
+  "new column test"
+
+run_and_expect_fail "Drop non-empty schema fails" \
+  "DROP SCHEMA iceberg.${SCHEMA}" \
+  "Schema not empty|Cannot drop non-empty schema|Namespace not empty"
+
+run_and_expect "Drop renamed table" \
+  "DROP TABLE iceberg.${SCHEMA}.${RENAMED_TABLE}" \
+  "DROP TABLE"
+
+run_and_expect "Drop empty schema" \
+  "DROP SCHEMA iceberg.${SCHEMA}" \
+  "DROP SCHEMA"
 
 echo "Integration tests passed."
 echo "Mock log:  ${MOCK_LOG}"

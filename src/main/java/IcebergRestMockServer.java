@@ -27,15 +27,13 @@ import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class IcebergRestMockServer {
     private static final int PORT = 8181;
-    private static final Pattern NAMESPACE_PATTERN = Pattern.compile("\\\"namespace\\\"\\s*:\\s*\\[\\s*\\\"([^\\\"]+)\\\"\\s*\\]");
     private static final String CONFIG_RESPONSE = "{\"defaults\":{},\"overrides\":{}}";
     private static final String TABLE_PATH_PREFIX = "/v1/namespaces/";
     private static final String TABLES_SEGMENT = "/tables";
@@ -45,10 +43,11 @@ public class IcebergRestMockServer {
 
     private static NamespaceStore namespaceStore;
     private static TableStore tableStore;
+    private static final Map<String, Map<String, String>> namespaceProperties = new HashMap<>();
 
     public static void main(String[] args) throws IOException {
         boolean useFdb = isFdbEnabled(args);
-        HttpServer server = startServer(PORT, buildNamespaceStore(useFdb), buildTableStore(useFdb));
+        startServer(PORT, buildNamespaceStore(useFdb), buildTableStore(useFdb));
         System.out.println("Iceberg REST mock server listening on http://localhost:" + PORT);
         System.out.println("Serving GET /v1/config");
         System.out.println("Serving GET /v1/namespaces");
@@ -60,9 +59,16 @@ public class IcebergRestMockServer {
     static HttpServer startServer(int port, NamespaceStore nsStore, TableStore tblStore) throws IOException {
         namespaceStore = nsStore;
         tableStore = tblStore;
+        synchronized (namespaceProperties) {
+            namespaceProperties.clear();
+            for (String namespace : namespaceStore.listNamespaces()) {
+                namespaceProperties.put(namespace, new LinkedHashMap<>());
+            }
+        }
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/v1/config", new ConfigHandler());
         server.createContext("/v1/namespaces", new NamespacesHandler());
+        server.createContext("/v1/tables", new NamespacesHandler());
         server.createContext("/", new NotFoundHandler());
         server.setExecutor(Executors.newFixedThreadPool(4));
         server.start();
@@ -98,6 +104,8 @@ public class IcebergRestMockServer {
         List<String> listNamespaces();
 
         void createNamespace(String namespace);
+
+        boolean deleteNamespace(String namespace);
     }
 
     interface TableStore {
@@ -106,6 +114,10 @@ public class IcebergRestMockServer {
         void putTableResponse(String namespace, String table, String responseJson);
 
         List<String> listTables(String namespace);
+
+        boolean deleteTable(String namespace, String table);
+
+        boolean renameTable(String sourceNamespace, String sourceTable, String targetNamespace, String targetTable);
     }
 
     static class InMemoryNamespaceStore implements NamespaceStore {
@@ -123,6 +135,11 @@ public class IcebergRestMockServer {
         @Override
         public synchronized void createNamespace(String namespace) {
             namespaces.add(namespace);
+        }
+
+        @Override
+        public synchronized boolean deleteNamespace(String namespace) {
+            return namespaces.remove(namespace);
         }
     }
 
@@ -159,6 +176,19 @@ public class IcebergRestMockServer {
                 return null;
             });
         }
+
+        @Override
+        public boolean deleteNamespace(String namespace) {
+            return database.run(context -> {
+                byte[] key = Tuple.from("iceberg-rest-mock", "namespace", namespace).pack();
+                byte[] existing = context.ensureActive().get(key).join();
+                if (existing == null) {
+                    return false;
+                }
+                context.ensureActive().clear(key);
+                return true;
+            });
+        }
     }
 
     static class InMemoryTableStore implements TableStore {
@@ -189,6 +219,22 @@ public class IcebergRestMockServer {
 
         private static String key(String namespace, String table) {
             return namespace + "." + table;
+        }
+
+        @Override
+        public synchronized boolean deleteTable(String namespace, String table) {
+            return tables.remove(key(namespace, table)) != null;
+        }
+
+        @Override
+        public synchronized boolean renameTable(String sourceNamespace, String sourceTable, String targetNamespace, String targetTable) {
+            String sourceKey = key(sourceNamespace, sourceTable);
+            String targetKey = key(targetNamespace, targetTable);
+            if (!tables.containsKey(sourceKey) || tables.containsKey(targetKey)) {
+                return false;
+            }
+            tables.put(targetKey, tables.remove(sourceKey));
+            return true;
         }
     }
 
@@ -233,6 +279,35 @@ public class IcebergRestMockServer {
                 }
                 Collections.sort(tables);
                 return tables;
+            });
+        }
+
+        @Override
+        public boolean deleteTable(String namespace, String table) {
+            return database.run(context -> {
+                byte[] key = Tuple.from("iceberg-rest-mock", "table", namespace, table).pack();
+                byte[] existing = context.ensureActive().get(key).join();
+                if (existing == null) {
+                    return false;
+                }
+                context.ensureActive().clear(key);
+                return true;
+            });
+        }
+
+        @Override
+        public boolean renameTable(String sourceNamespace, String sourceTable, String targetNamespace, String targetTable) {
+            return database.run(context -> {
+                byte[] sourceKey = Tuple.from("iceberg-rest-mock", "table", sourceNamespace, sourceTable).pack();
+                byte[] targetKey = Tuple.from("iceberg-rest-mock", "table", targetNamespace, targetTable).pack();
+                byte[] sourceValue = context.ensureActive().get(sourceKey).join();
+                byte[] targetValue = context.ensureActive().get(targetKey).join();
+                if (sourceValue == null || targetValue != null) {
+                    return false;
+                }
+                context.ensureActive().set(targetKey, sourceValue);
+                context.ensureActive().clear(sourceKey);
+                return true;
             });
         }
     }
@@ -575,13 +650,23 @@ public class IcebergRestMockServer {
             System.out.println("Received " + method + " " + path);
 
             try {
+                if ("POST".equals(method) && "/v1/tables/rename".equals(path)) {
+                    handleRenameTable(exchange, method, path);
+                    return;
+                }
+
+                if ("POST".equals(method) && path.startsWith("/v1/namespaces/") && path.endsWith("/properties")) {
+                    handleUpdateNamespaceProperties(exchange, method, path);
+                    return;
+                }
+
                 if (path.startsWith(TABLE_PATH_PREFIX) && path.contains(TABLES_SEGMENT)) {
                     handleTableRoutes(exchange, method, path);
                     return;
                 }
 
-                if ("GET".equals(method)) {
-                    handleGetNamespace(exchange, method, path);
+                if ("GET".equals(method) || "DELETE".equals(method)) {
+                    handleGetNamespace(exchange, method, path, exchange.getRequestURI().getQuery());
                     return;
                 }
 
@@ -599,6 +684,64 @@ public class IcebergRestMockServer {
             }
 
             sendIcebergError(exchange, 405, "Method Not Allowed", method, path);
+        }
+
+        private void handleUpdateNamespaceProperties(HttpExchange exchange, String method, String path) throws IOException {
+            String namespace = path.substring("/v1/namespaces/".length(), path.length() - "/properties".length());
+            if (namespace.endsWith("/")) {
+                namespace = namespace.substring(0, namespace.length() - 1);
+            }
+            if (namespace.isEmpty() || namespace.contains("/")) {
+                sendIcebergError(exchange, 404, "Not Found", method, path);
+                return;
+            }
+            if (!namespaceStore.listNamespaces().contains(namespace)) {
+                sendIcebergError(exchange, 404, "Namespace not found: " + namespace, method, path);
+                return;
+            }
+
+            String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            JsonNode root;
+            try {
+                root = OBJECT_MAPPER.readTree(requestBody);
+            } catch (JsonProcessingException e) {
+                sendIcebergError(exchange, 400, "Invalid request body", method, path);
+                return;
+            }
+            JsonNode updatesNode = root.path("updates");
+            JsonNode removalsNode = root.path("removals");
+            if (!updatesNode.isObject() || !removalsNode.isArray()) {
+                sendIcebergError(exchange, 400, "Invalid properties update payload", method, path);
+                return;
+            }
+
+            List<String> updated = new ArrayList<>();
+            List<String> removed = new ArrayList<>();
+            List<String> missing = new ArrayList<>();
+            synchronized (namespaceProperties) {
+                Map<String, String> properties = namespaceProperties.computeIfAbsent(namespace, ignored -> new LinkedHashMap<>());
+                updatesNode.fields().forEachRemaining(entry -> {
+                    properties.put(entry.getKey(), entry.getValue().asText(""));
+                    updated.add(entry.getKey());
+                });
+                for (JsonNode removal : removalsNode) {
+                    String key = removal.asText("");
+                    if (key.isEmpty()) {
+                        continue;
+                    }
+                    if (properties.containsKey(key)) {
+                        properties.remove(key);
+                        removed.add(key);
+                    } else {
+                        missing.add(key);
+                    }
+                }
+            }
+
+            String body = "{\"updated\":" + stringArrayJson(updated)
+                    + ",\"removed\":" + stringArrayJson(removed)
+                    + ",\"missing\":" + stringArrayJson(missing) + "}";
+            sendJson(exchange, 200, body, method, path);
         }
 
         private void handleTableRoutes(HttpExchange exchange, String method, String path) throws IOException {
@@ -635,6 +778,11 @@ public class IcebergRestMockServer {
                 return;
             }
 
+            if ("DELETE".equals(method) && parts.length == 3) {
+                handleDeleteTable(exchange, method, path, namespace, parts[2]);
+                return;
+            }
+
             if ("POST".equals(method) && parts.length == 4 && "metrics".equals(parts[3])) {
                 sendNoContent(exchange, method, path);
                 return;
@@ -643,9 +791,9 @@ public class IcebergRestMockServer {
             sendIcebergError(exchange, 404, "Not Found", method, path);
         }
 
-        private void handleGetNamespace(HttpExchange exchange, String method, String path) throws IOException {
+        private void handleGetNamespace(HttpExchange exchange, String method, String path, String query) throws IOException {
             if ("/v1/namespaces".equals(path) || "/v1/namespaces/".equals(path)) {
-                sendJson(exchange, 200, listNamespacesJson(), method, path);
+                sendJson(exchange, 200, listNamespacesJson(readQueryParam(query, "parent")), method, path);
                 return;
             }
 
@@ -660,12 +808,17 @@ public class IcebergRestMockServer {
                 return;
             }
 
+            if ("DELETE".equals(method)) {
+                handleDeleteNamespace(exchange, method, path, suffix);
+                return;
+            }
+
             if (!namespaceStore.listNamespaces().contains(suffix)) {
                 sendIcebergError(exchange, 404, "Namespace not found: " + suffix, method, path);
                 return;
             }
 
-            sendJson(exchange, 200, "{\"namespace\":[\"" + suffix + "\"],\"properties\":{}}", method, path);
+            sendJson(exchange, 200, namespaceObjectJson(suffix), method, path);
         }
 
         private void handleGetTable(HttpExchange exchange, String method, String path, String namespace, String table) throws IOException {
@@ -719,8 +872,11 @@ public class IcebergRestMockServer {
             }
             String tableName = root.path("name").asText();
             String normalizedResponseJson = normalizeMetadataLocation(loadTableResponseJson);
-            tableStore.putTableResponse(namespace, tableName, normalizedResponseJson);
-            IcebergRestMockServer.persistMetadataFile(normalizedResponseJson);
+            boolean stageCreate = root.path("stage-create").asBoolean(false);
+            if (!stageCreate) {
+                tableStore.putTableResponse(namespace, tableName, normalizedResponseJson);
+                IcebergRestMockServer.persistMetadataFile(normalizedResponseJson);
+            }
             sendJson(exchange, 200, normalizedResponseJson, method, path);
         }
 
@@ -753,261 +909,133 @@ public class IcebergRestMockServer {
         private void handleCreateNamespace(HttpExchange exchange, String method, String path) throws IOException {
             String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             System.out.println("Request body: " + requestBody);
-            Matcher matcher = NAMESPACE_PATTERN.matcher(requestBody);
-
-            if (!matcher.find()) {
+            JsonNode root;
+            try {
+                root = OBJECT_MAPPER.readTree(requestBody);
+            } catch (JsonProcessingException e) {
                 sendIcebergError(exchange, 400, "Invalid request body", method, path);
                 return;
             }
-
-            String namespaceValue = matcher.group(1).trim();
-            if (namespaceValue.isEmpty()) {
+            JsonNode nsNode = root.path("namespace");
+            if (!nsNode.isArray() || nsNode.isEmpty()) {
                 sendIcebergError(exchange, 400, "Invalid namespace", method, path);
                 return;
             }
-
+            List<String> nsParts = new ArrayList<>();
+            for (JsonNode part : nsNode) {
+                String value = part.asText("").trim();
+                if (value.isEmpty()) {
+                    sendIcebergError(exchange, 400, "Invalid namespace", method, path);
+                    return;
+                }
+                nsParts.add(value);
+            }
+            String namespaceValue = String.join(".", nsParts);
             namespaceStore.createNamespace(namespaceValue);
-            sendJson(exchange, 200, "{\"namespace\":[\"" + namespaceValue + "\"]}", method, path);
+
+            Map<String, String> properties = new LinkedHashMap<>();
+            JsonNode props = root.path("properties");
+            if (props.isObject()) {
+                props.fields().forEachRemaining(entry -> properties.put(entry.getKey(), entry.getValue().asText("")));
+            }
+            synchronized (namespaceProperties) {
+                namespaceProperties.put(namespaceValue, properties);
+            }
+            sendJson(exchange, 200, namespaceObjectJson(namespaceValue), method, path);
         }
 
-        private String buildLoadTableResponseJson(String namespace, String createTableRequestBody) {
-            JsonNode request;
-            try {
-                request = OBJECT_MAPPER.readTree(createTableRequestBody);
-            } catch (JsonProcessingException e) {
-                throw new IllegalArgumentException("Invalid JSON request body");
+        private void handleDeleteNamespace(HttpExchange exchange, String method, String path, String namespace) throws IOException {
+            if (!namespaceStore.listNamespaces().contains(namespace)) {
+                sendIcebergError(exchange, 404, "Namespace not found: " + namespace, method, path);
+                return;
             }
-
-            String tableName = request.path("name").asText();
-            if (tableName == null || tableName.isEmpty()) {
-                throw new IllegalArgumentException("Missing table name");
+            if (!tableStore.listTables(namespace).isEmpty()) {
+                sendIcebergError(exchange, 409, "Namespace not empty: " + namespace, method, path);
+                return;
             }
-
-            JsonNode schemaNode = request.get("schema");
-            if (schemaNode == null || schemaNode.isMissingNode() || !schemaNode.isObject()) {
-                throw new IllegalArgumentException("Missing or invalid schema");
-            }
-
-            ObjectNode schema = schemaNode.deepCopy();
-            if (!schema.has("schema-id")) {
-                schema.put("schema-id", 0);
-            }
-
-            long lastColumnId = 0;
-            JsonNode fieldsNode = schema.get("fields");
-            if (fieldsNode != null && fieldsNode.isArray()) {
-                for (JsonNode field : fieldsNode) {
-                    long id = field.path("id").asLong(0);
-                    if (id > lastColumnId) {
-                        lastColumnId = id;
-                    }
-                }
-            }
-
-            String tableUuid = UUID.randomUUID().toString();
-            String tableLocation = DEFAULT_WAREHOUSE_LOCATION + "/" + namespace + "/" + tableName;
-            String metadataLocation = DEFAULT_WAREHOUSE_LOCATION + "/_rest_metadata/" + tableUuid + "/00000-" + tableUuid + ".metadata.json";
-
-            ObjectNode metadata = OBJECT_MAPPER.createObjectNode();
-            metadata.put("format-version", 2);
-            metadata.put("table-uuid", tableUuid);
-            metadata.put("location", tableLocation);
-            metadata.put("last-sequence-number", 0);
-            metadata.put("last-updated-ms", System.currentTimeMillis());
-            metadata.put("last-column-id", lastColumnId);
-            metadata.put("current-schema-id", schema.path("schema-id").asInt(0));
-
-            ArrayNode schemas = metadata.putArray("schemas");
-            schemas.add(schema);
-
-            metadata.put("default-spec-id", 0);
-            ArrayNode partitionSpecs = metadata.putArray("partition-specs");
-            ObjectNode spec = OBJECT_MAPPER.createObjectNode();
-            spec.put("spec-id", 0);
-            spec.putArray("fields");
-            partitionSpecs.add(spec);
-
-            metadata.put("last-partition-id", 999);
-            metadata.put("default-sort-order-id", 0);
-            ArrayNode sortOrders = metadata.putArray("sort-orders");
-            ObjectNode sortOrder = OBJECT_MAPPER.createObjectNode();
-            sortOrder.put("order-id", 0);
-            sortOrder.putArray("fields");
-            sortOrders.add(sortOrder);
-
-            metadata.putObject("properties");
-            metadata.put("current-snapshot-id", -1);
-            metadata.putObject("refs");
-            metadata.putArray("snapshots");
-            metadata.putArray("statistics");
-            metadata.putArray("partition-statistics");
-            metadata.putArray("snapshot-log");
-            metadata.putArray("metadata-log");
-
-            ObjectNode response = OBJECT_MAPPER.createObjectNode();
-            response.put("metadata-location", metadataLocation);
-            response.set("metadata", metadata);
-            response.putObject("config");
-
-            try {
-                return OBJECT_MAPPER.writeValueAsString(response);
-            } catch (JsonProcessingException e) {
-                throw new IllegalArgumentException("Failed to build table response");
-            }
-        }
-
-        private String applyCommitToTableResponseJson(String existingResponseJson, String commitRequestBody) {
-            JsonNode existingRoot;
-            JsonNode commitRoot;
-            try {
-                existingRoot = OBJECT_MAPPER.readTree(existingResponseJson);
-                commitRoot = OBJECT_MAPPER.readTree(commitRequestBody);
-            } catch (JsonProcessingException e) {
-                throw new IllegalArgumentException("Invalid JSON payload");
-            }
-
-            ObjectNode updatedRoot = existingRoot.deepCopy();
-            JsonNode metadataNode = updatedRoot.get("metadata");
-            if (metadataNode == null || !metadataNode.isObject()) {
-                throw new IllegalArgumentException("Stored table metadata is invalid");
-            }
-            ObjectNode metadata = (ObjectNode) metadataNode;
-
-            ArrayNode snapshots = ensureArray(metadata, "snapshots");
-            ObjectNode refs = ensureObject(metadata, "refs");
-            ArrayNode statistics = ensureArray(metadata, "statistics");
-            ArrayNode snapshotLog = ensureArray(metadata, "snapshot-log");
-            ArrayNode schemas = ensureArray(metadata, "schemas");
-
-            long maxSequence = metadata.path("last-sequence-number").asLong(0);
-            JsonNode updatesNode = commitRoot.get("updates");
-            if (updatesNode != null && updatesNode.isArray()) {
-                for (JsonNode updateNode : updatesNode) {
-                    String action = updateNode.path("action").asText("");
-                    if ("add-snapshot".equals(action)) {
-                        JsonNode snapshot = updateNode.get("snapshot");
-                        if (snapshot != null && snapshot.isObject()) {
-                            snapshots.add(snapshot.deepCopy());
-                            long seq = snapshot.path("sequence-number").asLong(0);
-                            if (seq > maxSequence) {
-                                maxSequence = seq;
-                            }
-                            long snapshotId = snapshot.path("snapshot-id").asLong(-1);
-                            long timestamp = snapshot.path("timestamp-ms").asLong(System.currentTimeMillis());
-                            if (snapshotId >= 0) {
-                                ObjectNode logEntry = OBJECT_MAPPER.createObjectNode();
-                                logEntry.put("timestamp-ms", timestamp);
-                                logEntry.put("snapshot-id", snapshotId);
-                                snapshotLog.add(logEntry);
-                            }
-                        }
-                    } else if ("set-snapshot-ref".equals(action)) {
-                        String refName = updateNode.path("ref-name").asText("");
-                        long snapshotId = updateNode.path("snapshot-id").asLong(-1);
-                        if (!refName.isEmpty() && snapshotId >= 0) {
-                            ObjectNode ref = OBJECT_MAPPER.createObjectNode();
-                            ref.put("snapshot-id", snapshotId);
-                            String refType = updateNode.path("type").asText("");
-                            if (!refType.isEmpty()) {
-                                ref.put("type", refType);
-                            }
-                            refs.set(refName, ref);
-                            if ("main".equals(refName)) {
-                                metadata.put("current-snapshot-id", snapshotId);
-                            }
-                        }
-                    } else if ("set-statistics".equals(action)) {
-                        JsonNode stats = updateNode.get("statistics");
-                        if (stats != null && stats.isObject()) {
-                            statistics.add(stats.deepCopy());
-                        }
-                    } else if ("add-schema".equals(action)) {
-                        JsonNode schema = updateNode.get("schema");
-                        if (schema != null && schema.isObject()) {
-                            schemas.add(schema.deepCopy());
-                        }
-                        long lastColumnId = updateNode.path("last-column-id").asLong(metadata.path("last-column-id").asLong(0));
-                        metadata.put("last-column-id", lastColumnId);
-                    } else if ("set-current-schema".equals(action)) {
-                        int schemaId = updateNode.path("schema-id").asInt(Integer.MIN_VALUE);
-                        if (schemaId == -1) {
-                            int latestSchemaId = metadata.path("current-schema-id").asInt(0);
-                            for (JsonNode schemaNode : schemas) {
-                                int candidate = schemaNode.path("schema-id").asInt(latestSchemaId);
-                                if (candidate > latestSchemaId) {
-                                    latestSchemaId = candidate;
-                                }
-                            }
-                            metadata.put("current-schema-id", latestSchemaId);
-                        } else if (schemaId != Integer.MIN_VALUE) {
-                            metadata.put("current-schema-id", schemaId);
-                        }
-                    }
-                }
-            }
-
-            metadata.put("last-sequence-number", maxSequence);
-            metadata.put("last-updated-ms", System.currentTimeMillis());
-
-            try {
-                return OBJECT_MAPPER.writeValueAsString(updatedRoot);
-            } catch (JsonProcessingException e) {
-                throw new IllegalArgumentException("Failed to serialize updated table metadata");
-            }
-        }
-
-        private ArrayNode ensureArray(ObjectNode parent, String fieldName) {
-            JsonNode node = parent.get(fieldName);
-            if (node == null || !node.isArray()) {
-                return parent.putArray(fieldName);
-            }
-            return (ArrayNode) node;
-        }
-
-        private ObjectNode ensureObject(ObjectNode parent, String fieldName) {
-            JsonNode node = parent.get(fieldName);
-            if (node == null || !node.isObject()) {
-                return parent.putObject(fieldName);
-            }
-            return (ObjectNode) node;
-        }
-
-
-        private void persistMetadataFile(String loadTableResponseJson) {
-            try {
-                JsonNode root = OBJECT_MAPPER.readTree(loadTableResponseJson);
-                String metadataLocation = root.path("metadata-location").asText(null);
-                JsonNode metadata = root.get("metadata");
-                if (metadataLocation == null || metadata == null || metadata.isMissingNode()) {
+            String prefix = namespace + ".";
+            for (String existing : namespaceStore.listNamespaces()) {
+                if (existing.startsWith(prefix)) {
+                    sendIcebergError(exchange, 409, "Namespace has children: " + namespace, method, path);
                     return;
                 }
-
-                Path metadataPath = resolveWritablePath(metadataLocation);
-                if (metadataPath == null) {
-                    return;
-                }
-                Path parent = metadataPath.getParent();
-                if (parent != null) {
-                    Files.createDirectories(parent);
-                }
-                Files.writeString(metadataPath, OBJECT_MAPPER.writeValueAsString(metadata), StandardCharsets.UTF_8);
-            } catch (Exception e) {
-                throw new RuntimeException("Failed to persist metadata file", e);
             }
+            namespaceStore.deleteNamespace(namespace);
+            synchronized (namespaceProperties) {
+                namespaceProperties.remove(namespace);
+            }
+            sendNoContent(exchange, method, path);
         }
 
-        private Path resolveWritablePath(String location) {
-            URI uri = URI.create(location);
-            String scheme = uri.getScheme();
-            if ("file".equalsIgnoreCase(scheme)) {
-                return Paths.get(uri);
+        private void handleDeleteTable(HttpExchange exchange, String method, String path, String namespace, String table) throws IOException {
+            if (!tableStore.deleteTable(namespace, table)) {
+                sendIcebergError(exchange, 404, "Table not found: " + namespace + "." + table, method, path);
+                return;
             }
-            if ("local".equalsIgnoreCase(scheme)) {
-                String relativePath = uri.getPath();
-                while (relativePath.startsWith("/")) {
-                    relativePath = relativePath.substring(1);
+            sendNoContent(exchange, method, path);
+        }
+
+        private void handleRenameTable(HttpExchange exchange, String method, String path) throws IOException {
+            String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            System.out.println("Request body: " + requestBody);
+            JsonNode root;
+            try {
+                root = OBJECT_MAPPER.readTree(requestBody);
+            } catch (JsonProcessingException e) {
+                sendIcebergError(exchange, 400, "Invalid request body", method, path);
+                return;
+            }
+            JsonNode source = root.path("source");
+            JsonNode destination = root.path("destination");
+            String sourceNamespace = namespaceFromNode(source.path("namespace"));
+            String destinationNamespace = namespaceFromNode(destination.path("namespace"));
+            String sourceName = source.path("name").asText("");
+            String destinationName = destination.path("name").asText("");
+            if (sourceNamespace == null || destinationNamespace == null || sourceName.isEmpty() || destinationName.isEmpty()) {
+                sendIcebergError(exchange, 400, "Invalid rename payload", method, path);
+                return;
+            }
+            if (!namespaceStore.listNamespaces().contains(sourceNamespace) || !namespaceStore.listNamespaces().contains(destinationNamespace)) {
+                sendIcebergError(exchange, 404, "Namespace not found", method, path);
+                return;
+            }
+            if (!tableStore.renameTable(sourceNamespace, sourceName, destinationNamespace, destinationName)) {
+                sendIcebergError(exchange, 404, "Table not found: " + sourceNamespace + "." + sourceName, method, path);
+                return;
+            }
+            sendNoContent(exchange, method, path);
+        }
+
+        private String namespaceFromNode(JsonNode nsNode) {
+            if (!nsNode.isArray() || nsNode.isEmpty()) {
+                return null;
+            }
+            List<String> parts = new ArrayList<>();
+            for (JsonNode part : nsNode) {
+                String value = part.asText("").trim();
+                if (value.isEmpty()) {
+                    return null;
                 }
-                return DEFAULT_LOCAL_ROOT.resolve(relativePath).normalize();
+                parts.add(value);
+            }
+            return String.join(".", parts);
+        }
+
+        private String readQueryParam(String query, String key) {
+            if (query == null || query.isEmpty()) {
+                return null;
+            }
+            String[] pieces = query.split("&");
+            for (String piece : pieces) {
+                int idx = piece.indexOf('=');
+                if (idx <= 0) {
+                    continue;
+                }
+                String param = piece.substring(0, idx);
+                String value = piece.substring(idx + 1);
+                if (key.equals(param) && !value.isBlank()) {
+                    return value;
+                }
             }
             return null;
         }
@@ -1016,17 +1044,79 @@ public class IcebergRestMockServer {
             return loadTableResponseJson;
         }
 
-        private static String listNamespacesJson() {
+        private static String listNamespacesJson(String parent) {
             List<String> namespaces = namespaceStore.listNamespaces();
             StringBuilder builder = new StringBuilder();
             builder.append("{\"namespaces\":[");
+            String parentPrefix = parent == null ? null : parent + ".";
+            int parentDepth = parent == null ? 0 : parent.split("\\.").length;
+            int written = 0;
             for (int i = 0; i < namespaces.size(); i++) {
+                String namespace = namespaces.get(i);
+                if (parent != null) {
+                    if (!namespace.startsWith(parentPrefix)) {
+                        continue;
+                    }
+                    if (namespace.split("\\.").length != parentDepth + 1) {
+                        continue;
+                    }
+                }
+                if (written > 0) {
+                    builder.append(",");
+                }
+                builder.append(namespaceArrayJson(namespace));
+                written++;
+            }
+            builder.append("]}");
+            return builder.toString();
+        }
+
+        private static String namespaceArrayJson(String namespace) {
+            String[] parts = namespace.split("\\.");
+            StringBuilder builder = new StringBuilder();
+            builder.append("[");
+            for (int i = 0; i < parts.length; i++) {
                 if (i > 0) {
                     builder.append(",");
                 }
-                builder.append("[\"").append(namespaces.get(i)).append("\"]");
+                builder.append("\"").append(escapeJson(parts[i])).append("\"");
             }
-            builder.append("]}");
+            builder.append("]");
+            return builder.toString();
+        }
+
+        private static String namespaceObjectJson(String namespace) {
+            StringBuilder builder = new StringBuilder();
+            builder.append("{\"namespace\":")
+                    .append(namespaceArrayJson(namespace))
+                    .append(",\"properties\":");
+            Map<String, String> properties;
+            synchronized (namespaceProperties) {
+                properties = namespaceProperties.getOrDefault(namespace, Map.of());
+            }
+            builder.append("{");
+            int i = 0;
+            for (Map.Entry<String, String> entry : properties.entrySet()) {
+                if (i++ > 0) {
+                    builder.append(",");
+                }
+                builder.append("\"").append(escapeJson(entry.getKey())).append("\":\"")
+                        .append(escapeJson(entry.getValue())).append("\"");
+            }
+            builder.append("}}");
+            return builder.toString();
+        }
+
+        private static String stringArrayJson(List<String> values) {
+            StringBuilder builder = new StringBuilder();
+            builder.append("[");
+            for (int i = 0; i < values.size(); i++) {
+                if (i > 0) {
+                    builder.append(",");
+                }
+                builder.append("\"").append(escapeJson(values.get(i))).append("\"");
+            }
+            builder.append("]");
             return builder.toString();
         }
     }
