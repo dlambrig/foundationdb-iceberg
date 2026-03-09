@@ -1,13 +1,13 @@
 # foundationdb-iceberg
 
 Prototype Iceberg REST catalog work with:
-- a Java mock REST server (`IcebergRestMockServer`)
+- a Java REST server (`IcebergRestServer`)
 - optional FoundationDB-backed metadata storage mode
 - local Trino integration testing harness
 
 ## Requirements
 
-### For mock server only
+### For server only
 - macOS/Linux shell environment
 - JDK 21+
 - Gradle wrapper from this repo (`./gradlew`)
@@ -41,26 +41,30 @@ docker cp fdb:/var/fdb/fdb.cluster ./fdb.cluster
 ## What Works So Far
 - Basic Iceberg REST catalog endpoints used by Trino for:
   - catalog config
-  - namespace list/create/get
-  - table create/get/list
+  - namespace list/create/get/delete
+  - nested namespace creation and parent-filtered listing (`GET /v1/namespaces?parent=...`)
+  - namespace properties updates (`POST /v1/namespaces/{ns}/properties`)
+  - table create/get/list/delete
+  - table rename (`POST /v1/tables/rename`)
+  - staged create behavior (`stage-create=true` returns load response without persisting table)
   - table commit updates (including snapshot and schema-evolution paths used in current tests)
   - metrics endpoint stub used by Trino
 - Error responses are formatted for Iceberg REST clients.
-- Integration harness can start mock + Trino, run SQL, and validate expected results.
+- Integration harness can start server + Trino, run SQL, and validate expected results.
 
-## Run Mock Server
+## Run Server
 From repo root:
 
 ```bash
-./gradlew runIcebergRestMock
+./gradlew runIcebergRestServer
 ```
 
 FoundationDB mode:
 
 ```bash
-./gradlew runIcebergRestMock --args="--fdb"
+./gradlew runIcebergRestServer --args="--fdb"
 # or
-./gradlew runIcebergRestMock -Dfdb=true
+./gradlew runIcebergRestServer -Dfdb=true
 ```
 
 ## Run Integration Test Harness
@@ -70,9 +74,9 @@ FoundationDB mode:
 ```
 
 This script:
-- starts the mock server
+- starts the server
 - starts Trino
-- runs SQL checks for create/insert/read/snapshots/schema-evolution
+- runs SQL checks for create/insert/read/snapshots/schema-evolution/rename/drop lifecycle
 - writes logs under `integration/logs/`
 
 ## Current Scope

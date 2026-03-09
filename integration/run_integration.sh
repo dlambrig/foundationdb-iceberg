@@ -4,7 +4,7 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="${PROJECT_ROOT}/integration/logs"
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
-MOCK_LOG="${LOG_DIR}/mock_${RUN_ID}.log"
+SERVER_LOG="${LOG_DIR}/server_${RUN_ID}.log"
 TRINO_LOG="${LOG_DIR}/trino_${RUN_ID}.log"
 
 TRINO_HOME="${TRINO_HOME:-/Users/dlambrig/trino}"
@@ -49,7 +49,7 @@ fi
 
 mkdir -p "${LOG_DIR}"
 
-MOCK_PID=""
+SERVER_PID=""
 TRINO_PID=""
 
 cleanup() {
@@ -57,8 +57,8 @@ cleanup() {
   if [[ -n "${TRINO_PID}" ]]; then
     kill "${TRINO_PID}" >/dev/null 2>&1 || true
   fi
-  if [[ -n "${MOCK_PID}" ]]; then
-    kill "${MOCK_PID}" >/dev/null 2>&1 || true
+  if [[ -n "${SERVER_PID}" ]]; then
+    kill "${SERVER_PID}" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -117,8 +117,8 @@ run_and_expect() {
     echo "SQL failed: ${sql}" >&2
     echo "Output:" >&2
     echo "${out}" >&2
-    echo "--- MOCK LOG (tail) ---" >&2
-    tail -n 80 "${MOCK_LOG}" >&2 || true
+    echo "--- SERVER LOG (tail) ---" >&2
+    tail -n 80 "${SERVER_LOG}" >&2 || true
     echo "--- TRINO LOG (tail) ---" >&2
     tail -n 80 "${TRINO_LOG}" >&2 || true
     exit 1
@@ -156,17 +156,17 @@ run_and_expect_fail() {
   fi
 }
 
-require_port_free 8181 "Mock server"
+require_port_free 8181 "Server"
 require_port_free 8080 "Trino server"
 
-echo "Starting mock server..."
+echo "Starting server..."
 (
   cd "${PROJECT_ROOT}"
-  ./gradlew runIcebergRestMock
-) >"${MOCK_LOG}" 2>&1 &
-MOCK_PID=$!
+  ./gradlew runIcebergRestServer
+) >"${SERVER_LOG}" 2>&1 &
+SERVER_PID=$!
 
-wait_for_http "http://localhost:8181/v1/config" "Mock server"
+wait_for_http "http://localhost:8181/v1/config" "Server"
 
 echo "Starting Trino server..."
 "${TRINO_LAUNCHER}" -etc-dir "${TRINO_ETC}" run >"${TRINO_LOG}" 2>&1 &
@@ -231,5 +231,5 @@ run_and_expect "Drop empty schema" \
   "DROP SCHEMA"
 
 echo "Integration tests passed."
-echo "Mock log:  ${MOCK_LOG}"
+echo "Server log: ${SERVER_LOG}"
 echo "Trino log: ${TRINO_LOG}"

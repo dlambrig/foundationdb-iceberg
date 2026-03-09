@@ -16,7 +16,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class IcebergRestMockServerHttpTest {
+class IcebergRestServerHttpTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private HttpServer server;
@@ -24,9 +24,9 @@ class IcebergRestMockServerHttpTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        IcebergRestMockServer.NamespaceStore ns = new IcebergRestMockServer.InMemoryNamespaceStore(List.of("sales"));
-        IcebergRestMockServer.TableStore tables = new IcebergRestMockServer.InMemoryTableStore();
-        server = IcebergRestMockServer.startServer(0, ns, tables);
+        IcebergRestServer.NamespaceStore ns = new IcebergRestServer.InMemoryNamespaceStore(List.of("sales"));
+        IcebergRestServer.TableStore tables = new IcebergRestServer.InMemoryTableStore();
+        server = IcebergRestServer.startServer(0, ns, tables);
         baseUrl = "http://localhost:" + server.getAddress().getPort();
     }
 
