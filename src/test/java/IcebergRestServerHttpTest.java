@@ -24,8 +24,8 @@ class IcebergRestServerHttpTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        IcebergRestServer.NamespaceStore ns = new IcebergRestServer.InMemoryNamespaceStore(List.of("sales"));
-        IcebergRestServer.TableStore tables = new IcebergRestServer.InMemoryTableStore();
+        NamespaceStore ns = new InMemoryNamespaceStore(List.of("sales"));
+        TableStore tables = new InMemoryTableStore();
         server = IcebergRestServer.startServer(0, ns, tables);
         baseUrl = "http://localhost:" + server.getAddress().getPort();
     }
