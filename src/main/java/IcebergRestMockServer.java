@@ -48,22 +48,25 @@ public class IcebergRestMockServer {
 
     public static void main(String[] args) throws IOException {
         boolean useFdb = isFdbEnabled(args);
-        namespaceStore = buildNamespaceStore(useFdb);
-        tableStore = buildTableStore(useFdb);
-
-        HttpServer server = HttpServer.create(new InetSocketAddress(PORT), 0);
-        server.createContext("/v1/config", new ConfigHandler());
-        server.createContext("/v1/namespaces", new NamespacesHandler());
-        server.createContext("/", new NotFoundHandler());
-        server.setExecutor(Executors.newFixedThreadPool(4));
-        server.start();
-
+        HttpServer server = startServer(PORT, buildNamespaceStore(useFdb), buildTableStore(useFdb));
         System.out.println("Iceberg REST mock server listening on http://localhost:" + PORT);
         System.out.println("Serving GET /v1/config");
         System.out.println("Serving GET /v1/namespaces");
         System.out.println("Serving POST /v1/namespaces");
         System.out.println("Serving GET /v1/namespaces/{ns}/tables/{table}");
         System.out.println("Serving POST /v1/namespaces/{ns}/tables");
+    }
+
+    static HttpServer startServer(int port, NamespaceStore nsStore, TableStore tblStore) throws IOException {
+        namespaceStore = nsStore;
+        tableStore = tblStore;
+        HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
+        server.createContext("/v1/config", new ConfigHandler());
+        server.createContext("/v1/namespaces", new NamespacesHandler());
+        server.createContext("/", new NotFoundHandler());
+        server.setExecutor(Executors.newFixedThreadPool(4));
+        server.start();
+        return server;
     }
 
     private static boolean isFdbEnabled(String[] args) {
@@ -91,13 +94,13 @@ public class IcebergRestMockServer {
         return new FdbTableStore();
     }
 
-    private interface NamespaceStore {
+    interface NamespaceStore {
         List<String> listNamespaces();
 
         void createNamespace(String namespace);
     }
 
-    private interface TableStore {
+    interface TableStore {
         String getTableResponse(String namespace, String table);
 
         void putTableResponse(String namespace, String table, String responseJson);
@@ -105,10 +108,10 @@ public class IcebergRestMockServer {
         List<String> listTables(String namespace);
     }
 
-    private static class InMemoryNamespaceStore implements NamespaceStore {
+    static class InMemoryNamespaceStore implements NamespaceStore {
         private final Set<String> namespaces = new LinkedHashSet<>();
 
-        private InMemoryNamespaceStore(List<String> initialNamespaces) {
+        InMemoryNamespaceStore(List<String> initialNamespaces) {
             namespaces.addAll(initialNamespaces);
         }
 
@@ -158,7 +161,7 @@ public class IcebergRestMockServer {
         }
     }
 
-    private static class InMemoryTableStore implements TableStore {
+    static class InMemoryTableStore implements TableStore {
         private final Map<String, String> tables = new HashMap<>();
 
         @Override
@@ -232,6 +235,320 @@ public class IcebergRestMockServer {
                 return tables;
             });
         }
+    }
+
+    static String buildLoadTableResponseJson(String namespace, String createTableRequestBody) {
+        JsonNode request;
+        try {
+            request = OBJECT_MAPPER.readTree(createTableRequestBody);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Invalid JSON request body");
+        }
+
+        String tableName = request.path("name").asText();
+        if (tableName == null || tableName.isEmpty()) {
+            throw new IllegalArgumentException("Missing table name");
+        }
+
+        JsonNode schemaNode = request.get("schema");
+        if (schemaNode == null || schemaNode.isMissingNode() || !schemaNode.isObject()) {
+            throw new IllegalArgumentException("Missing or invalid schema");
+        }
+
+        ObjectNode schema = schemaNode.deepCopy();
+        if (!schema.has("schema-id")) {
+            schema.put("schema-id", 0);
+        }
+
+        long lastColumnId = 0;
+        JsonNode fieldsNode = schema.get("fields");
+        if (fieldsNode != null && fieldsNode.isArray()) {
+            for (JsonNode field : fieldsNode) {
+                long id = field.path("id").asLong(0);
+                if (id > lastColumnId) {
+                    lastColumnId = id;
+                }
+            }
+        }
+
+        String tableUuid = UUID.randomUUID().toString();
+        String tableLocation = DEFAULT_WAREHOUSE_LOCATION + "/" + namespace + "/" + tableName;
+        String metadataLocation = DEFAULT_WAREHOUSE_LOCATION + "/_rest_metadata/" + tableUuid + "/00000-" + tableUuid + ".metadata.json";
+
+        ObjectNode metadata = OBJECT_MAPPER.createObjectNode();
+        metadata.put("format-version", 2);
+        metadata.put("table-uuid", tableUuid);
+        metadata.put("location", tableLocation);
+        metadata.put("last-sequence-number", 0);
+        metadata.put("last-updated-ms", System.currentTimeMillis());
+        metadata.put("last-column-id", lastColumnId);
+        metadata.put("current-schema-id", schema.path("schema-id").asInt(0));
+
+        ArrayNode schemas = metadata.putArray("schemas");
+        schemas.add(schema);
+
+        metadata.put("default-spec-id", 0);
+        ArrayNode partitionSpecs = metadata.putArray("partition-specs");
+        ObjectNode spec = OBJECT_MAPPER.createObjectNode();
+        spec.put("spec-id", 0);
+        spec.putArray("fields");
+        partitionSpecs.add(spec);
+
+        metadata.put("last-partition-id", 999);
+        metadata.put("default-sort-order-id", 0);
+        ArrayNode sortOrders = metadata.putArray("sort-orders");
+        ObjectNode sortOrder = OBJECT_MAPPER.createObjectNode();
+        sortOrder.put("order-id", 0);
+        sortOrder.putArray("fields");
+        sortOrders.add(sortOrder);
+
+        metadata.putObject("properties");
+        metadata.put("current-snapshot-id", -1);
+        metadata.putObject("refs");
+        metadata.putArray("snapshots");
+        metadata.putArray("statistics");
+        metadata.putArray("partition-statistics");
+        metadata.putArray("snapshot-log");
+        metadata.putArray("metadata-log");
+
+        ObjectNode response = OBJECT_MAPPER.createObjectNode();
+        response.put("metadata-location", metadataLocation);
+        response.set("metadata", metadata);
+        response.putObject("config");
+
+        try {
+            return OBJECT_MAPPER.writeValueAsString(response);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Failed to build table response");
+        }
+    }
+
+    static String applyCommitToTableResponseJson(String existingResponseJson, String commitRequestBody) {
+        JsonNode existingRoot;
+        JsonNode commitRoot;
+        try {
+            existingRoot = OBJECT_MAPPER.readTree(existingResponseJson);
+            commitRoot = OBJECT_MAPPER.readTree(commitRequestBody);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Invalid JSON payload");
+        }
+
+        ObjectNode updatedRoot = existingRoot.deepCopy();
+        JsonNode metadataNode = updatedRoot.get("metadata");
+        if (metadataNode == null || !metadataNode.isObject()) {
+            throw new IllegalArgumentException("Stored table metadata is invalid");
+        }
+        ObjectNode metadata = (ObjectNode) metadataNode;
+
+        validateCommitRequirements(commitRoot, metadata);
+
+        ArrayNode snapshots = ensureArray(metadata, "snapshots");
+        ObjectNode refs = ensureObject(metadata, "refs");
+        ArrayNode statistics = ensureArray(metadata, "statistics");
+        ArrayNode snapshotLog = ensureArray(metadata, "snapshot-log");
+        ArrayNode schemas = ensureArray(metadata, "schemas");
+
+        long maxSequence = metadata.path("last-sequence-number").asLong(0);
+        JsonNode updatesNode = commitRoot.get("updates");
+        if (updatesNode == null || !updatesNode.isArray()) {
+            throw new IllegalArgumentException("Missing or invalid updates");
+        }
+        for (JsonNode updateNode : updatesNode) {
+            String action = updateNode.path("action").asText("");
+            if (action.isEmpty()) {
+                throw new IllegalArgumentException("Missing update action");
+            }
+            if ("add-snapshot".equals(action)) {
+                JsonNode snapshot = updateNode.get("snapshot");
+                if (snapshot == null || !snapshot.isObject()) {
+                    throw new IllegalArgumentException("add-snapshot requires snapshot object");
+                }
+                if (!snapshot.has("snapshot-id") || !snapshot.has("sequence-number")) {
+                    throw new IllegalArgumentException("add-snapshot requires snapshot-id and sequence-number");
+                }
+                snapshots.add(snapshot.deepCopy());
+                long seq = snapshot.path("sequence-number").asLong(0);
+                if (seq > maxSequence) {
+                    maxSequence = seq;
+                }
+                long snapshotId = snapshot.path("snapshot-id").asLong(-1);
+                long timestamp = snapshot.path("timestamp-ms").asLong(System.currentTimeMillis());
+                if (snapshotId >= 0) {
+                    ObjectNode logEntry = OBJECT_MAPPER.createObjectNode();
+                    logEntry.put("timestamp-ms", timestamp);
+                    logEntry.put("snapshot-id", snapshotId);
+                    snapshotLog.add(logEntry);
+                }
+            } else if ("set-snapshot-ref".equals(action)) {
+                String refName = updateNode.path("ref-name").asText("");
+                long snapshotId = updateNode.path("snapshot-id").asLong(Long.MIN_VALUE);
+                if (refName.isEmpty() || snapshotId == Long.MIN_VALUE) {
+                    throw new IllegalArgumentException("set-snapshot-ref requires ref-name and snapshot-id");
+                }
+                ObjectNode ref = OBJECT_MAPPER.createObjectNode();
+                ref.put("snapshot-id", snapshotId);
+                String refType = updateNode.path("type").asText("");
+                if (!refType.isEmpty()) {
+                    ref.put("type", refType);
+                }
+                refs.set(refName, ref);
+                if ("main".equals(refName)) {
+                    metadata.put("current-snapshot-id", snapshotId);
+                }
+            } else if ("set-statistics".equals(action)) {
+                JsonNode stats = updateNode.get("statistics");
+                if (stats == null || !stats.isObject()) {
+                    throw new IllegalArgumentException("set-statistics requires statistics object");
+                }
+                statistics.add(stats.deepCopy());
+            } else if ("add-schema".equals(action)) {
+                JsonNode schema = updateNode.get("schema");
+                if (schema == null || !schema.isObject()) {
+                    throw new IllegalArgumentException("add-schema requires schema object");
+                }
+                schemas.add(schema.deepCopy());
+                long lastColumnId = updateNode.path("last-column-id").asLong(metadata.path("last-column-id").asLong(0));
+                metadata.put("last-column-id", lastColumnId);
+            } else if ("set-current-schema".equals(action)) {
+                int schemaId = updateNode.path("schema-id").asInt(Integer.MIN_VALUE);
+                if (schemaId == Integer.MIN_VALUE) {
+                    throw new IllegalArgumentException("set-current-schema requires schema-id");
+                }
+                if (schemaId == -1) {
+                    int latestSchemaId = metadata.path("current-schema-id").asInt(0);
+                    for (JsonNode schemaNode : schemas) {
+                        int candidate = schemaNode.path("schema-id").asInt(latestSchemaId);
+                        if (candidate > latestSchemaId) {
+                            latestSchemaId = candidate;
+                        }
+                    }
+                    metadata.put("current-schema-id", latestSchemaId);
+                } else {
+                    boolean exists = false;
+                    for (JsonNode schemaNode : schemas) {
+                        if (schemaNode.path("schema-id").asInt(Integer.MIN_VALUE) == schemaId) {
+                            exists = true;
+                            break;
+                        }
+                    }
+                    if (!exists) {
+                        throw new IllegalArgumentException("set-current-schema references unknown schema-id: " + schemaId);
+                    }
+                    metadata.put("current-schema-id", schemaId);
+                }
+            } else {
+                throw new IllegalArgumentException("Unsupported update action: " + action);
+            }
+        }
+
+        metadata.put("last-sequence-number", maxSequence);
+        metadata.put("last-updated-ms", System.currentTimeMillis());
+
+        try {
+            return OBJECT_MAPPER.writeValueAsString(updatedRoot);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Failed to serialize updated table metadata");
+        }
+    }
+
+    private static void validateCommitRequirements(JsonNode commitRoot, ObjectNode metadata) {
+        JsonNode requirements = commitRoot.get("requirements");
+        if (requirements == null || requirements.isMissingNode()) {
+            return;
+        }
+        if (!requirements.isArray()) {
+            throw new IllegalArgumentException("Invalid requirements");
+        }
+        for (JsonNode requirement : requirements) {
+            String type = requirement.path("type").asText("");
+            if (type.isEmpty()) {
+                throw new IllegalArgumentException("Requirement type is missing");
+            }
+            if ("assert-table-uuid".equals(type)) {
+                String expected = requirement.path("uuid").asText("");
+                String actual = metadata.path("table-uuid").asText("");
+                if (!expected.equals(actual)) {
+                    throw new IllegalStateException("assert-table-uuid failed");
+                }
+            } else if ("assert-ref-snapshot-id".equals(type)) {
+                String ref = requirement.path("ref").asText("");
+                JsonNode expectedNode = requirement.get("snapshot-id");
+                JsonNode actualNode = metadata.path("refs").path(ref).get("snapshot-id");
+                boolean matches = (expectedNode == null || expectedNode.isNull())
+                        ? (actualNode == null || actualNode.isNull())
+                        : (actualNode != null && actualNode.asLong(Long.MIN_VALUE) == expectedNode.asLong(Long.MAX_VALUE));
+                if (!matches) {
+                    throw new IllegalStateException("assert-ref-snapshot-id failed");
+                }
+            } else if ("assert-current-schema-id".equals(type)) {
+                int expected = requirement.path("current-schema-id").asInt(Integer.MIN_VALUE);
+                int actual = metadata.path("current-schema-id").asInt(Integer.MIN_VALUE);
+                if (expected == Integer.MIN_VALUE || expected != actual) {
+                    throw new IllegalStateException("assert-current-schema-id failed");
+                }
+            } else if ("assert-last-assigned-field-id".equals(type)) {
+                long expected = requirement.path("last-assigned-field-id").asLong(Long.MIN_VALUE);
+                long actual = metadata.path("last-column-id").asLong(Long.MIN_VALUE);
+                if (expected == Long.MIN_VALUE || expected != actual) {
+                    throw new IllegalStateException("assert-last-assigned-field-id failed");
+                }
+            }
+        }
+    }
+
+    static void persistMetadataFile(String loadTableResponseJson) {
+        try {
+            JsonNode root = OBJECT_MAPPER.readTree(loadTableResponseJson);
+            String metadataLocation = root.path("metadata-location").asText(null);
+            JsonNode metadata = root.get("metadata");
+            if (metadataLocation == null || metadata == null || metadata.isMissingNode()) {
+                return;
+            }
+
+            Path metadataPath = resolveWritablePath(metadataLocation);
+            if (metadataPath == null) {
+                return;
+            }
+            Path parent = metadataPath.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+            Files.writeString(metadataPath, OBJECT_MAPPER.writeValueAsString(metadata), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to persist metadata file", e);
+        }
+    }
+
+    static Path resolveWritablePath(String location) {
+        URI uri = URI.create(location);
+        String scheme = uri.getScheme();
+        if ("file".equalsIgnoreCase(scheme)) {
+            return Paths.get(uri);
+        }
+        if ("local".equalsIgnoreCase(scheme)) {
+            String relativePath = uri.getPath();
+            while (relativePath.startsWith("/")) {
+                relativePath = relativePath.substring(1);
+            }
+            return DEFAULT_LOCAL_ROOT.resolve(relativePath).normalize();
+        }
+        return null;
+    }
+
+    private static ArrayNode ensureArray(ObjectNode parent, String fieldName) {
+        JsonNode node = parent.get(fieldName);
+        if (node == null || !node.isArray()) {
+            return parent.putArray(fieldName);
+        }
+        return (ArrayNode) node;
+    }
+
+    private static ObjectNode ensureObject(ObjectNode parent, String fieldName) {
+        JsonNode node = parent.get(fieldName);
+        if (node == null || !node.isObject()) {
+            return parent.putObject(fieldName);
+        }
+        return (ObjectNode) node;
     }
 
     private static class ConfigHandler implements HttpHandler {
@@ -387,17 +704,23 @@ public class IcebergRestMockServer {
 
             String loadTableResponseJson;
             try {
-                loadTableResponseJson = buildLoadTableResponseJson(namespace, requestBody);
+                loadTableResponseJson = IcebergRestMockServer.buildLoadTableResponseJson(namespace, requestBody);
             } catch (IllegalArgumentException e) {
                 sendIcebergError(exchange, 400, e.getMessage(), method, path);
                 return;
             }
 
-            JsonNode root = OBJECT_MAPPER.readTree(requestBody);
+            JsonNode root;
+            try {
+                root = OBJECT_MAPPER.readTree(requestBody);
+            } catch (JsonProcessingException e) {
+                sendIcebergError(exchange, 400, "Invalid JSON request body", method, path);
+                return;
+            }
             String tableName = root.path("name").asText();
             String normalizedResponseJson = normalizeMetadataLocation(loadTableResponseJson);
             tableStore.putTableResponse(namespace, tableName, normalizedResponseJson);
-            persistMetadataFile(normalizedResponseJson);
+            IcebergRestMockServer.persistMetadataFile(normalizedResponseJson);
             sendJson(exchange, 200, normalizedResponseJson, method, path);
         }
 
@@ -412,15 +735,18 @@ public class IcebergRestMockServer {
 
             String updatedResponseJson;
             try {
-                updatedResponseJson = applyCommitToTableResponseJson(existingResponseJson, requestBody);
+                updatedResponseJson = IcebergRestMockServer.applyCommitToTableResponseJson(existingResponseJson, requestBody);
             } catch (IllegalArgumentException e) {
                 sendIcebergError(exchange, 400, e.getMessage(), method, path);
+                return;
+            } catch (IllegalStateException e) {
+                sendIcebergError(exchange, 409, e.getMessage(), method, path);
                 return;
             }
 
             String normalizedResponseJson = normalizeMetadataLocation(updatedResponseJson);
             tableStore.putTableResponse(namespace, table, normalizedResponseJson);
-            persistMetadataFile(normalizedResponseJson);
+            IcebergRestMockServer.persistMetadataFile(normalizedResponseJson);
             sendJson(exchange, 200, normalizedResponseJson, method, path);
         }
 
