@@ -5,6 +5,39 @@ Prototype Iceberg REST catalog work with:
 - optional FoundationDB-backed metadata storage mode
 - local Trino integration testing harness
 
+## Requirements
+
+### For mock server only
+- macOS/Linux shell environment
+- JDK 21+
+- Gradle wrapper from this repo (`./gradlew`)
+
+### For integration harness (`./integration/run_integration.sh`)
+- Everything above, plus:
+- Local Trino checkout/build available (set via `TRINO_HOME` if not default)
+- Trino server launcher available under `core/trino-server/target/.../bin/.../launcher`
+- Trino CLI jar available at `client/trino-cli/target/trino-cli-*-executable.jar`
+- `curl` and `lsof` installed
+
+### Optional for FoundationDB mode
+- Running FoundationDB service
+- `fdb.cluster` available locally
+- FoundationDB client library (`libfdb_c`) available to the JVM if required by your setup
+
+Quick local option (Docker):
+
+```bash
+docker run -d --name fdb \
+  -e FDB_NETWORKING_MODE=host \
+  -e FDB_PORT=4550 \
+  -e FDB_COORDINATOR_PORT=4550 \
+  -p 4550:4550/tcp \
+  foundationdb/foundationdb:7.3.38
+
+# copy cluster file from container to your local project directory
+docker cp fdb:/var/fdb/fdb.cluster ./fdb.cluster
+```
+
 ## What Works So Far
 - Basic Iceberg REST catalog endpoints used by Trino for:
   - catalog config
