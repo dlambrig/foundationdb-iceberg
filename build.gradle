@@ -14,6 +14,9 @@ dependencies {
     implementation 'com.google.protobuf:protobuf-java:3.25.3'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
     runtimeOnly 'org.slf4j:slf4j-nop:1.7.36'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
 }
 
 protobuf {
@@ -71,4 +74,8 @@ tasks.register('runIcebergRestMock', JavaExec) {
     if (fdbProperty != null) {
         systemProperty 'fdb', fdbProperty
     }
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
 }
