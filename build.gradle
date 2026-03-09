@@ -1,7 +1,6 @@
 plugins {
     id 'java'
     id 'application'
-    id 'com.google.protobuf' version '0.9.6'
 }
 
 repositories {
@@ -11,18 +10,11 @@ repositories {
 dependencies {
     implementation 'org.foundationdb:fdb-record-layer-core-pb3:2.8.110.0'
     implementation 'org.foundationdb:fdb-java:7.3.57'
-    implementation 'com.google.protobuf:protobuf-java:3.25.3'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
     runtimeOnly 'org.slf4j:slf4j-nop:1.7.36'
 
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
-}
-
-protobuf {
-    protoc {
-        artifact = 'com.google.protobuf:protoc:3.25.3'
-    }
 }
 
 application {
@@ -49,11 +41,11 @@ tasks.named('run', JavaExec) {
     }
 }
 
-tasks.register('runIcebergRestMock', JavaExec) {
+tasks.register('runIcebergRestServer', JavaExec) {
     group = 'application'
-    description = 'Runs a minimal Iceberg REST mock server on port 8181.'
+    description = 'Runs a minimal Iceberg REST server on port 8181.'
     classpath = sourceSets.main.runtimeClasspath
-    mainClass = 'IcebergRestMockServer'
+    mainClass = 'IcebergRestServer'
 
     // FoundationDB-friendly defaults for optional --fdb mode.
     systemProperty 'FDB_LIBRARY_PATH_FDB_C', '/usr/local/lib/libfdb_c.dylib'

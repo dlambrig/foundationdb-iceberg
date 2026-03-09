@@ -1,14 +1,14 @@
 # Integration Harness
 
 This harness starts:
-- `IcebergRestMockServer` (in-memory mode) on `:8181`
+- `IcebergRestServer` (in-memory mode) on `:8181`
 - Trino server pointed at your existing `~/trino/etc` config
 - non-interactive SQL checks via `trino-cli --execute`
 
 ## Run
 
 ```bash
-cd /Users/dlambrig/apple/record-layer-demo
+cd /Users/dlambrig/apple/foundationdb-iceberg
 ./integration/run_integration.sh
 ```
 
@@ -43,5 +43,5 @@ TRINO_HOME=/path/to/trino TRINO_ETC=/path/to/etc ./integration/run_integration.s
 
 Per-run logs are written to:
 
-- `integration/logs/mock_<timestamp>.log`
+- `integration/logs/server_<timestamp>.log`
 - `integration/logs/trino_<timestamp>.log`

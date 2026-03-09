@@ -32,7 +32,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 
-public class IcebergRestMockServer {
+public class IcebergRestServer {
     private static final int PORT = 8181;
     private static final String CONFIG_RESPONSE = "{\"defaults\":{},\"overrides\":{}}";
     private static final String TABLE_PATH_PREFIX = "/v1/namespaces/";
@@ -48,7 +48,7 @@ public class IcebergRestMockServer {
     public static void main(String[] args) throws IOException {
         boolean useFdb = isFdbEnabled(args);
         startServer(PORT, buildNamespaceStore(useFdb), buildTableStore(useFdb));
-        System.out.println("Iceberg REST mock server listening on http://localhost:" + PORT);
+        System.out.println("Iceberg REST server listening on http://localhost:" + PORT);
         System.out.println("Serving GET /v1/config");
         System.out.println("Serving GET /v1/namespaces");
         System.out.println("Serving POST /v1/namespaces");
@@ -144,7 +144,7 @@ public class IcebergRestMockServer {
     }
 
     private static class FdbNamespaceStore implements NamespaceStore {
-        private static final Tuple PREFIX_TUPLE = Tuple.from("iceberg-rest-mock", "namespace");
+        private static final Tuple PREFIX_TUPLE = Tuple.from("iceberg-rest-server", "namespace");
         private final FDBDatabase database;
         private final byte[] prefixBytes;
 
@@ -171,7 +171,7 @@ public class IcebergRestMockServer {
         @Override
         public void createNamespace(String namespace) {
             database.run(context -> {
-                byte[] key = Tuple.from("iceberg-rest-mock", "namespace", namespace).pack();
+                byte[] key = Tuple.from("iceberg-rest-server", "namespace", namespace).pack();
                 context.ensureActive().set(key, new byte[] {1});
                 return null;
             });
@@ -180,7 +180,7 @@ public class IcebergRestMockServer {
         @Override
         public boolean deleteNamespace(String namespace) {
             return database.run(context -> {
-                byte[] key = Tuple.from("iceberg-rest-mock", "namespace", namespace).pack();
+                byte[] key = Tuple.from("iceberg-rest-server", "namespace", namespace).pack();
                 byte[] existing = context.ensureActive().get(key).join();
                 if (existing == null) {
                     return false;
@@ -248,7 +248,7 @@ public class IcebergRestMockServer {
         @Override
         public String getTableResponse(String namespace, String table) {
             return database.run(context -> {
-                byte[] key = Tuple.from("iceberg-rest-mock", "table", namespace, table).pack();
+                byte[] key = Tuple.from("iceberg-rest-server", "table", namespace, table).pack();
                 byte[] value = context.ensureActive().get(key).join();
                 if (value == null) {
                     return null;
@@ -260,7 +260,7 @@ public class IcebergRestMockServer {
         @Override
         public void putTableResponse(String namespace, String table, String responseJson) {
             database.run(context -> {
-                byte[] key = Tuple.from("iceberg-rest-mock", "table", namespace, table).pack();
+                byte[] key = Tuple.from("iceberg-rest-server", "table", namespace, table).pack();
                 context.ensureActive().set(key, responseJson.getBytes(StandardCharsets.UTF_8));
                 return null;
             });
@@ -269,7 +269,7 @@ public class IcebergRestMockServer {
         @Override
         public List<String> listTables(String namespace) {
             return database.run(context -> {
-                byte[] prefix = Tuple.from("iceberg-rest-mock", "table", namespace).pack();
+                byte[] prefix = Tuple.from("iceberg-rest-server", "table", namespace).pack();
                 List<KeyValue> rows = context.ensureActive().getRange(Range.startsWith(prefix)).asList().join();
                 List<String> tables = new ArrayList<>();
                 for (KeyValue row : rows) {
@@ -285,7 +285,7 @@ public class IcebergRestMockServer {
         @Override
         public boolean deleteTable(String namespace, String table) {
             return database.run(context -> {
-                byte[] key = Tuple.from("iceberg-rest-mock", "table", namespace, table).pack();
+                byte[] key = Tuple.from("iceberg-rest-server", "table", namespace, table).pack();
                 byte[] existing = context.ensureActive().get(key).join();
                 if (existing == null) {
                     return false;
@@ -298,8 +298,8 @@ public class IcebergRestMockServer {
         @Override
         public boolean renameTable(String sourceNamespace, String sourceTable, String targetNamespace, String targetTable) {
             return database.run(context -> {
-                byte[] sourceKey = Tuple.from("iceberg-rest-mock", "table", sourceNamespace, sourceTable).pack();
-                byte[] targetKey = Tuple.from("iceberg-rest-mock", "table", targetNamespace, targetTable).pack();
+                byte[] sourceKey = Tuple.from("iceberg-rest-server", "table", sourceNamespace, sourceTable).pack();
+                byte[] targetKey = Tuple.from("iceberg-rest-server", "table", targetNamespace, targetTable).pack();
                 byte[] sourceValue = context.ensureActive().get(sourceKey).join();
                 byte[] targetValue = context.ensureActive().get(targetKey).join();
                 if (sourceValue == null || targetValue != null) {
@@ -857,7 +857,7 @@ public class IcebergRestMockServer {
 
             String loadTableResponseJson;
             try {
-                loadTableResponseJson = IcebergRestMockServer.buildLoadTableResponseJson(namespace, requestBody);
+                loadTableResponseJson = IcebergRestServer.buildLoadTableResponseJson(namespace, requestBody);
             } catch (IllegalArgumentException e) {
                 sendIcebergError(exchange, 400, e.getMessage(), method, path);
                 return;
@@ -875,7 +875,7 @@ public class IcebergRestMockServer {
             boolean stageCreate = root.path("stage-create").asBoolean(false);
             if (!stageCreate) {
                 tableStore.putTableResponse(namespace, tableName, normalizedResponseJson);
-                IcebergRestMockServer.persistMetadataFile(normalizedResponseJson);
+                IcebergRestServer.persistMetadataFile(normalizedResponseJson);
             }
             sendJson(exchange, 200, normalizedResponseJson, method, path);
         }
@@ -891,7 +891,7 @@ public class IcebergRestMockServer {
 
             String updatedResponseJson;
             try {
-                updatedResponseJson = IcebergRestMockServer.applyCommitToTableResponseJson(existingResponseJson, requestBody);
+                updatedResponseJson = IcebergRestServer.applyCommitToTableResponseJson(existingResponseJson, requestBody);
             } catch (IllegalArgumentException e) {
                 sendIcebergError(exchange, 400, e.getMessage(), method, path);
                 return;
@@ -902,7 +902,7 @@ public class IcebergRestMockServer {
 
             String normalizedResponseJson = normalizeMetadataLocation(updatedResponseJson);
             tableStore.putTableResponse(namespace, table, normalizedResponseJson);
-            IcebergRestMockServer.persistMetadataFile(normalizedResponseJson);
+            IcebergRestServer.persistMetadataFile(normalizedResponseJson);
             sendJson(exchange, 200, normalizedResponseJson, method, path);
         }
 

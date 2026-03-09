@@ -9,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class IcebergRestMockServerLogicTest {
+class IcebergRestServerLogicTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Test
@@ -21,7 +21,7 @@ class IcebergRestMockServerLogicTest {
                 ]}}
                 """;
 
-        String response = IcebergRestMockServer.buildLoadTableResponseJson("sales", createRequest);
+        String response = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
         JsonNode root = MAPPER.readTree(response);
 
         String metadataLocation = root.path("metadata-location").asText();
@@ -42,7 +42,7 @@ class IcebergRestMockServerLogicTest {
                 ]}}
                 """;
 
-        String baseResponse = IcebergRestMockServer.buildLoadTableResponseJson("sales", createRequest);
+        String baseResponse = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
 
         String commit1 = """
                 {
@@ -54,7 +54,7 @@ class IcebergRestMockServerLogicTest {
                 }
                 """;
 
-        String afterCommit1 = IcebergRestMockServer.applyCommitToTableResponseJson(baseResponse, commit1);
+        String afterCommit1 = IcebergRestServer.applyCommitToTableResponseJson(baseResponse, commit1);
         JsonNode metadata1 = MAPPER.readTree(afterCommit1).path("metadata");
 
         assertEquals(1, metadata1.path("last-sequence-number").asInt());
@@ -77,7 +77,7 @@ class IcebergRestMockServerLogicTest {
                 }
                 """;
 
-        String afterCommit2 = IcebergRestMockServer.applyCommitToTableResponseJson(afterCommit1, commit2);
+        String afterCommit2 = IcebergRestServer.applyCommitToTableResponseJson(afterCommit1, commit2);
         JsonNode metadata2 = MAPPER.readTree(afterCommit2).path("metadata");
 
         assertEquals(4, metadata2.path("last-column-id").asInt());
@@ -92,7 +92,7 @@ class IcebergRestMockServerLogicTest {
                 {"id":1,"name":"order_id","required":false,"type":"long"}
                 ]}}
                 """;
-        String base = IcebergRestMockServer.buildLoadTableResponseJson("sales", createRequest);
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
 
         String addSchema = """
                 {
@@ -102,7 +102,7 @@ class IcebergRestMockServerLogicTest {
                   ]
                 }
                 """;
-        String updated = IcebergRestMockServer.applyCommitToTableResponseJson(base, addSchema);
+        String updated = IcebergRestServer.applyCommitToTableResponseJson(base, addSchema);
         JsonNode metadata = MAPPER.readTree(updated).path("metadata");
         assertEquals(7, metadata.path("current-schema-id").asInt());
 
@@ -111,7 +111,7 @@ class IcebergRestMockServerLogicTest {
                 """;
         IllegalArgumentException ex = assertThrows(
                 IllegalArgumentException.class,
-                () -> IcebergRestMockServer.applyCommitToTableResponseJson(updated, unknownSchema));
+                () -> IcebergRestServer.applyCommitToTableResponseJson(updated, unknownSchema));
         assertTrue(ex.getMessage().contains("unknown schema-id"));
     }
 
@@ -120,14 +120,14 @@ class IcebergRestMockServerLogicTest {
         String createRequest = """
                 {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
                 """;
-        String base = IcebergRestMockServer.buildLoadTableResponseJson("sales", createRequest);
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
 
         String unknownAction = """
                 {"updates":[{"action":"do-something-else"}]}
                 """;
         IllegalArgumentException unknown = assertThrows(
                 IllegalArgumentException.class,
-                () -> IcebergRestMockServer.applyCommitToTableResponseJson(base, unknownAction));
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, unknownAction));
         assertTrue(unknown.getMessage().contains("Unsupported update action"));
 
         String missingSnapshotFields = """
@@ -135,7 +135,7 @@ class IcebergRestMockServerLogicTest {
                 """;
         IllegalArgumentException missing = assertThrows(
                 IllegalArgumentException.class,
-                () -> IcebergRestMockServer.applyCommitToTableResponseJson(base, missingSnapshotFields));
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, missingSnapshotFields));
         assertTrue(missing.getMessage().contains("snapshot-id"));
     }
 
@@ -144,7 +144,7 @@ class IcebergRestMockServerLogicTest {
         String createRequest = """
                 {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
                 """;
-        String base = IcebergRestMockServer.buildLoadTableResponseJson("sales", createRequest);
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
 
         String commit = """
                 {
@@ -155,22 +155,22 @@ class IcebergRestMockServerLogicTest {
                   ]
                 }
                 """;
-        String once = IcebergRestMockServer.applyCommitToTableResponseJson(base, commit);
+        String once = IcebergRestServer.applyCommitToTableResponseJson(base, commit);
         assertEquals(111L, MAPPER.readTree(once).path("metadata").path("current-snapshot-id").asLong());
 
         IllegalStateException conflict = assertThrows(
                 IllegalStateException.class,
-                () -> IcebergRestMockServer.applyCommitToTableResponseJson(once, commit));
+                () -> IcebergRestServer.applyCommitToTableResponseJson(once, commit));
         assertTrue(conflict.getMessage().contains("assert-ref-snapshot-id"));
     }
 
     @Test
     void resolveWritablePathHandlesLocalAndFileSchemes() {
-        Path localPath = IcebergRestMockServer.resolveWritablePath("local:///iceberg_warehouse/a/b/c.metadata.json");
+        Path localPath = IcebergRestServer.resolveWritablePath("local:///iceberg_warehouse/a/b/c.metadata.json");
         assertTrue(localPath.toString().contains("iceberg_warehouse"));
 
         Path expectedFilePath = Paths.get("/tmp/x.metadata.json");
-        Path actualFilePath = IcebergRestMockServer.resolveWritablePath("file:///tmp/x.metadata.json");
+        Path actualFilePath = IcebergRestServer.resolveWritablePath("file:///tmp/x.metadata.json");
         assertEquals(expectedFilePath, actualFilePath);
     }
 }
