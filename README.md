@@ -22,7 +22,7 @@ Prototype Iceberg REST catalog work with:
 ### Optional for FoundationDB mode
 - Running FoundationDB service
 - `fdb.cluster` available locally
-- FoundationDB client library (`libfdb_c`) available to the JVM if required by your setup
+- FoundationDB client library (`libfdb_c`) available to the JVM when running FDB mode
 
 Quick local option (Docker):
 
