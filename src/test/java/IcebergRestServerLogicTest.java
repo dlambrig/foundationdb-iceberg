@@ -4,6 +4,14 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -292,6 +300,64 @@ class IcebergRestServerLogicTest {
                 IllegalArgumentException.class,
                 () -> IcebergRestServer.applyCommitToTableResponseJson(base, malformed));
         assertTrue(ex2.getMessage().contains("requires integer default-spec-id"));
+    }
+
+    @Test
+    void inMemoryAtomicCommitAllowsOnlyOneWriterForSameRequirement() throws Exception {
+        InMemoryTableStore store = new InMemoryTableStore();
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+        store.putTableResponse("sales", "orders", base);
+
+        String commit = """
+                {
+                  "requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null}],
+                  "updates":[
+                    {"action":"add-snapshot","snapshot":{"sequence-number":1,"snapshot-id":111,"timestamp-ms":1700000000000,"schema-id":0}},
+                    {"action":"set-snapshot-ref","ref-name":"main","snapshot-id":111,"type":"branch"}
+                  ]
+                }
+                """;
+
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            List<Callable<String>> tasks = new ArrayList<>();
+            for (int i = 0; i < 2; i++) {
+                tasks.add(() -> {
+                    start.await(5, TimeUnit.SECONDS);
+                    try {
+                        store.commitTable("sales", "orders", commit);
+                        return "success";
+                    } catch (IllegalStateException e) {
+                        return "conflict";
+                    }
+                });
+            }
+            List<Future<String>> futures = new ArrayList<>();
+            for (Callable<String> task : tasks) {
+                futures.add(pool.submit(task));
+            }
+            start.countDown();
+
+            int success = 0;
+            int conflict = 0;
+            for (Future<String> future : futures) {
+                String outcome = future.get(10, TimeUnit.SECONDS);
+                if ("success".equals(outcome)) {
+                    success++;
+                } else if ("conflict".equals(outcome)) {
+                    conflict++;
+                }
+            }
+
+            assertEquals(1, success);
+            assertEquals(1, conflict);
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     @Test
