@@ -216,6 +216,85 @@ class IcebergRestServerLogicTest {
     }
 
     @Test
+    void assertCreateRequirementFailsOnExistingTableCommitPath() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String commit = """
+                {
+                  "requirements":[{"type":"assert-create"}],
+                  "updates":[]
+                }
+                """;
+        IllegalStateException ex = assertThrows(
+                IllegalStateException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, commit));
+        assertTrue(ex.getMessage().contains("assert-create failed"));
+    }
+
+    @Test
+    void assertLastAssignedPartitionIdSupportsSuccessConflictAndBadPayload() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String success = """
+                {"requirements":[{"type":"assert-last-assigned-partition-id","last-assigned-partition-id":999}],"updates":[]}
+                """;
+        String unchanged = IcebergRestServer.applyCommitToTableResponseJson(base, success);
+        assertEquals(999L, MAPPER.readTree(unchanged).path("metadata").path("last-partition-id").asLong());
+
+        String conflict = """
+                {"requirements":[{"type":"assert-last-assigned-partition-id","last-assigned-partition-id":1000}],"updates":[]}
+                """;
+        IllegalStateException ex1 = assertThrows(
+                IllegalStateException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, conflict));
+        assertTrue(ex1.getMessage().contains("assert-last-assigned-partition-id failed"));
+
+        String malformed = """
+                {"requirements":[{"type":"assert-last-assigned-partition-id","last-assigned-partition-id":"abc"}],"updates":[]}
+                """;
+        IllegalArgumentException ex2 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, malformed));
+        assertTrue(ex2.getMessage().contains("requires integer last-assigned-partition-id"));
+    }
+
+    @Test
+    void assertDefaultSpecIdSupportsSuccessConflictAndBadPayload() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String success = """
+                {"requirements":[{"type":"assert-default-spec-id","default-spec-id":0}],"updates":[]}
+                """;
+        String unchanged = IcebergRestServer.applyCommitToTableResponseJson(base, success);
+        assertEquals(0L, MAPPER.readTree(unchanged).path("metadata").path("default-spec-id").asLong());
+
+        String conflict = """
+                {"requirements":[{"type":"assert-default-spec-id","default-spec-id":1}],"updates":[]}
+                """;
+        IllegalStateException ex1 = assertThrows(
+                IllegalStateException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, conflict));
+        assertTrue(ex1.getMessage().contains("assert-default-spec-id failed"));
+
+        String malformed = """
+                {"requirements":[{"type":"assert-default-spec-id","default-spec-id":"abc"}],"updates":[]}
+                """;
+        IllegalArgumentException ex2 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, malformed));
+        assertTrue(ex2.getMessage().contains("requires integer default-spec-id"));
+    }
+
+    @Test
     void resolveWritablePathHandlesLocalAndFileSchemes() {
         Path localPath = IcebergRestServer.resolveWritablePath("local:///iceberg_warehouse/a/b/c.metadata.json");
         assertTrue(localPath.toString().contains("iceberg_warehouse"));

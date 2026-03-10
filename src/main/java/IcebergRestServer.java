@@ -323,7 +323,9 @@ public class IcebergRestServer {
             if (type.isEmpty()) {
                 throw new IllegalArgumentException("Requirement type is missing");
             }
-            if ("assert-table-uuid".equals(type)) {
+            if ("assert-create".equals(type)) {
+                throw new IllegalStateException("assert-create failed");
+            } else if ("assert-table-uuid".equals(type)) {
                 JsonNode expectedNode = requirement.get("uuid");
                 if (expectedNode == null || !expectedNode.isTextual() || expectedNode.asText("").isEmpty()) {
                     throw new IllegalArgumentException("assert-table-uuid requires non-empty uuid");
@@ -372,6 +374,26 @@ public class IcebergRestServer {
                 long actual = metadata.path("last-column-id").asLong(Long.MIN_VALUE);
                 if (expected == Long.MIN_VALUE || expected != actual) {
                     throw new IllegalStateException("assert-last-assigned-field-id failed");
+                }
+            } else if ("assert-last-assigned-partition-id".equals(type)) {
+                JsonNode expectedNode = requirement.get("last-assigned-partition-id");
+                if (expectedNode == null || !expectedNode.canConvertToLong()) {
+                    throw new IllegalArgumentException("assert-last-assigned-partition-id requires integer last-assigned-partition-id");
+                }
+                long expected = expectedNode.asLong(Long.MIN_VALUE);
+                long actual = metadata.path("last-partition-id").asLong(Long.MIN_VALUE);
+                if (expected == Long.MIN_VALUE || expected != actual) {
+                    throw new IllegalStateException("assert-last-assigned-partition-id failed");
+                }
+            } else if ("assert-default-spec-id".equals(type)) {
+                JsonNode expectedNode = requirement.get("default-spec-id");
+                if (expectedNode == null || !expectedNode.canConvertToLong()) {
+                    throw new IllegalArgumentException("assert-default-spec-id requires integer default-spec-id");
+                }
+                long expected = expectedNode.asLong(Long.MIN_VALUE);
+                long actual = metadata.path("default-spec-id").asLong(Long.MIN_VALUE);
+                if (expected == Long.MIN_VALUE || expected != actual) {
+                    throw new IllegalStateException("assert-default-spec-id failed");
                 }
             } else {
                 throw new IllegalArgumentException("Unsupported requirement type: " + type);
@@ -679,6 +701,14 @@ public class IcebergRestServer {
                 return;
             }
             String tableName = root.path("name").asText();
+            if (tableName == null || tableName.isEmpty()) {
+                sendIcebergError(exchange, 400, "Missing table name", method, path);
+                return;
+            }
+            if (tableStore.getTableResponse(namespace, tableName) != null) {
+                sendIcebergError(exchange, 409, "Table already exists: " + namespace + "." + tableName, method, path);
+                return;
+            }
             String normalizedResponseJson = normalizeMetadataLocation(loadTableResponseJson);
             boolean stageCreate = root.path("stage-create").asBoolean(false);
             if (!stageCreate) {
