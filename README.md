@@ -48,6 +48,7 @@ docker cp fdb:/var/fdb/fdb.cluster ./fdb.cluster
   - table rename (`POST /v1/tables/rename`)
   - staged create behavior (`stage-create=true` returns load response without persisting table)
   - table commit updates (including snapshot and schema-evolution paths used in current tests)
+  - strict validation for unknown commit requirement types and malformed `assert-ref-snapshot-id` payloads
   - metrics endpoint stub used by Trino
 - Error responses are formatted for Iceberg REST clients.
 - Integration harness can start server + Trino, run SQL, and validate expected results.

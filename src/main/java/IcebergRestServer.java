@@ -316,19 +316,36 @@ public class IcebergRestServer {
             throw new IllegalArgumentException("Invalid requirements");
         }
         for (JsonNode requirement : requirements) {
+            if (!requirement.isObject()) {
+                throw new IllegalArgumentException("Invalid requirement entry");
+            }
             String type = requirement.path("type").asText("");
             if (type.isEmpty()) {
                 throw new IllegalArgumentException("Requirement type is missing");
             }
             if ("assert-table-uuid".equals(type)) {
-                String expected = requirement.path("uuid").asText("");
+                JsonNode expectedNode = requirement.get("uuid");
+                if (expectedNode == null || !expectedNode.isTextual() || expectedNode.asText("").isEmpty()) {
+                    throw new IllegalArgumentException("assert-table-uuid requires non-empty uuid");
+                }
+                String expected = expectedNode.asText();
                 String actual = metadata.path("table-uuid").asText("");
                 if (!expected.equals(actual)) {
                     throw new IllegalStateException("assert-table-uuid failed");
                 }
             } else if ("assert-ref-snapshot-id".equals(type)) {
-                String ref = requirement.path("ref").asText("");
+                JsonNode refNode = requirement.get("ref");
+                if (refNode == null || !refNode.isTextual() || refNode.asText("").isEmpty()) {
+                    throw new IllegalArgumentException("assert-ref-snapshot-id requires non-empty ref");
+                }
+                String ref = refNode.asText();
                 JsonNode expectedNode = requirement.get("snapshot-id");
+                if (expectedNode == null) {
+                    throw new IllegalArgumentException("assert-ref-snapshot-id requires snapshot-id");
+                }
+                if (!expectedNode.isNull() && !expectedNode.canConvertToLong()) {
+                    throw new IllegalArgumentException("assert-ref-snapshot-id snapshot-id must be an integer or null");
+                }
                 JsonNode actualNode = metadata.path("refs").path(ref).get("snapshot-id");
                 boolean matches = (expectedNode == null || expectedNode.isNull())
                         ? (actualNode == null || actualNode.isNull())
@@ -337,17 +354,27 @@ public class IcebergRestServer {
                     throw new IllegalStateException("assert-ref-snapshot-id failed");
                 }
             } else if ("assert-current-schema-id".equals(type)) {
-                int expected = requirement.path("current-schema-id").asInt(Integer.MIN_VALUE);
+                JsonNode expectedNode = requirement.get("current-schema-id");
+                if (expectedNode == null || !expectedNode.canConvertToInt()) {
+                    throw new IllegalArgumentException("assert-current-schema-id requires integer current-schema-id");
+                }
+                int expected = expectedNode.asInt(Integer.MIN_VALUE);
                 int actual = metadata.path("current-schema-id").asInt(Integer.MIN_VALUE);
                 if (expected == Integer.MIN_VALUE || expected != actual) {
                     throw new IllegalStateException("assert-current-schema-id failed");
                 }
             } else if ("assert-last-assigned-field-id".equals(type)) {
-                long expected = requirement.path("last-assigned-field-id").asLong(Long.MIN_VALUE);
+                JsonNode expectedNode = requirement.get("last-assigned-field-id");
+                if (expectedNode == null || !expectedNode.canConvertToLong()) {
+                    throw new IllegalArgumentException("assert-last-assigned-field-id requires integer last-assigned-field-id");
+                }
+                long expected = expectedNode.asLong(Long.MIN_VALUE);
                 long actual = metadata.path("last-column-id").asLong(Long.MIN_VALUE);
                 if (expected == Long.MIN_VALUE || expected != actual) {
                     throw new IllegalStateException("assert-last-assigned-field-id failed");
                 }
+            } else {
+                throw new IllegalArgumentException("Unsupported requirement type: " + type);
             }
         }
     }

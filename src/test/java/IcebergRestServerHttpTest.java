@@ -130,6 +130,25 @@ class IcebergRestServerHttpTest {
     }
 
     @Test
+    void commitRejectsUnknownRequirementTypeAndMalformedAssertRefPayload() throws Exception {
+        request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
+        String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables", tableBody).statusCode);
+
+        HttpResponse unknownRequirement = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":\"assert-unknown\",\"value\":1}],\"updates\":[]}");
+        assertEquals(400, unknownRequirement.statusCode);
+
+        HttpResponse malformedAssertRef = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":\"assert-ref-snapshot-id\",\"snapshot-id\":null}],\"updates\":[]}");
+        assertEquals(400, malformedAssertRef.statusCode);
+    }
+
+    @Test
     void repeatedCommitReturnsConflict() throws Exception {
         request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
         String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";

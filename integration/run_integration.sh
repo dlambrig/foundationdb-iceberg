@@ -6,6 +6,37 @@ LOG_DIR="${PROJECT_ROOT}/integration/logs"
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
 SERVER_LOG="${LOG_DIR}/server_${RUN_ID}.log"
 TRINO_LOG="${LOG_DIR}/trino_${RUN_ID}.log"
+SERVER_MODE="memory"
+SERVER_GRADLE_ARGS=()
+
+usage() {
+  cat <<'EOF'
+Usage: ./integration/run_integration.sh [--fdb]
+
+Options:
+  --fdb    Run IcebergRestServer in FoundationDB mode (-Dfdb=true).
+  -h       Show help.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --fdb)
+      SERVER_MODE="fdb"
+      SERVER_GRADLE_ARGS=(-Dfdb=true)
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: Unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
 
 TRINO_HOME="${TRINO_HOME:-/Users/dlambrig/trino}"
 TRINO_ETC="${TRINO_ETC:-${TRINO_HOME}/etc}"
@@ -56,10 +87,26 @@ cleanup() {
   set +e
   if [[ -n "${TRINO_PID}" ]]; then
     kill "${TRINO_PID}" >/dev/null 2>&1 || true
+    wait "${TRINO_PID}" >/dev/null 2>&1 || true
   fi
   if [[ -n "${SERVER_PID}" ]]; then
     kill "${SERVER_PID}" >/dev/null 2>&1 || true
+    wait "${SERVER_PID}" >/dev/null 2>&1 || true
   fi
+
+  # Gradle/launcher can leave child processes behind; force-clear integration ports.
+  for port in 8181 8080; do
+    local pids
+    pids="$(lsof -ti tcp:${port} || true)"
+    if [[ -n "${pids}" ]]; then
+      kill ${pids} >/dev/null 2>&1 || true
+      sleep 1
+      pids="$(lsof -ti tcp:${port} || true)"
+      if [[ -n "${pids}" ]]; then
+        kill -9 ${pids} >/dev/null 2>&1 || true
+      fi
+    fi
+  done
 }
 trap cleanup EXIT
 
@@ -104,6 +151,35 @@ wait_for_trino() {
   done
   echo "ERROR: Timed out waiting for Trino" >&2
   return 1
+}
+
+require_fdb_prereqs() {
+  local cluster_file="${PROJECT_ROOT}/fdb.cluster"
+  if [[ ! -f "${cluster_file}" ]]; then
+    echo "ERROR: --fdb mode requires ${cluster_file}" >&2
+    exit 1
+  fi
+
+  local fdb_lib="${FDB_LIBRARY_PATH_FDB_C:-/usr/local/lib/libfdb_c.dylib}"
+  if [[ ! -f "${fdb_lib}" ]]; then
+    echo "ERROR: --fdb mode requires FoundationDB client library at ${fdb_lib}" >&2
+    echo "Set FDB_LIBRARY_PATH_FDB_C to the correct libfdb_c path." >&2
+    exit 1
+  fi
+
+  if ! command -v fdbcli >/dev/null 2>&1; then
+    echo "ERROR: --fdb mode requires 'fdbcli' to verify FoundationDB is running." >&2
+    exit 1
+  fi
+
+  local status_output
+  if ! status_output="$(fdbcli -C "${cluster_file}" --exec "status" 2>&1)"; then
+    echo "ERROR: FoundationDB is not reachable using ${cluster_file}." >&2
+    echo "Start FoundationDB first, then retry ./integration/run_integration.sh --fdb" >&2
+    echo "fdbcli output:" >&2
+    echo "${status_output}" >&2
+    exit 1
+  fi
 }
 
 run_and_expect() {
@@ -158,11 +234,14 @@ run_and_expect_fail() {
 
 require_port_free 8181 "Server"
 require_port_free 8080 "Trino server"
+if [[ "${SERVER_MODE}" == "fdb" ]]; then
+  require_fdb_prereqs
+fi
 
 echo "Starting server..."
 (
   cd "${PROJECT_ROOT}"
-  ./gradlew runIcebergRestServer
+  ./gradlew runIcebergRestServer "${SERVER_GRADLE_ARGS[@]}"
 ) >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
 
