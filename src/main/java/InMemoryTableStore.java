@@ -18,6 +18,17 @@ class InMemoryTableStore implements TableStore {
     }
 
     @Override
+    public synchronized String commitTable(String namespace, String table, String commitRequestBody) {
+        String existingResponseJson = tables.get(key(namespace, table));
+        if (existingResponseJson == null) {
+            throw new TableStore.TableNotFoundException("Table not found: " + namespace + "." + table);
+        }
+        String updatedResponseJson = IcebergRestServer.applyCommitToTableResponseJson(existingResponseJson, commitRequestBody);
+        tables.put(key(namespace, table), updatedResponseJson);
+        return updatedResponseJson;
+    }
+
+    @Override
     public synchronized List<String> listTables(String namespace) {
         List<String> results = new ArrayList<>();
         String prefix = namespace + ".";

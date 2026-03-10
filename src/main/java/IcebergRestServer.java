@@ -721,15 +721,12 @@ public class IcebergRestServer {
         private void handleCommitTable(HttpExchange exchange, String method, String path, String namespace, String table) throws IOException {
             String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             System.out.println("Request body: " + requestBody);
-            String existingResponseJson = tableStore.getTableResponse(namespace, table);
-            if (existingResponseJson == null) {
-                sendIcebergError(exchange, 404, "Table not found: " + namespace + "." + table, method, path);
-                return;
-            }
-
             String updatedResponseJson;
             try {
-                updatedResponseJson = IcebergRestServer.applyCommitToTableResponseJson(existingResponseJson, requestBody);
+                updatedResponseJson = tableStore.commitTable(namespace, table, requestBody);
+            } catch (TableStore.TableNotFoundException e) {
+                sendIcebergError(exchange, 404, e.getMessage(), method, path);
+                return;
             } catch (IllegalArgumentException e) {
                 sendIcebergError(exchange, 400, e.getMessage(), method, path);
                 return;
@@ -739,7 +736,9 @@ public class IcebergRestServer {
             }
 
             String normalizedResponseJson = normalizeMetadataLocation(updatedResponseJson);
-            tableStore.putTableResponse(namespace, table, normalizedResponseJson);
+            if (!normalizedResponseJson.equals(updatedResponseJson)) {
+                tableStore.putTableResponse(namespace, table, normalizedResponseJson);
+            }
             IcebergRestServer.persistMetadataFile(normalizedResponseJson);
             sendJson(exchange, 200, normalizedResponseJson, method, path);
         }

@@ -38,6 +38,22 @@ class FdbTableStore implements TableStore {
     }
 
     @Override
+    public String commitTable(String namespace, String table, String commitRequestBody) {
+        return database.run(context -> {
+            byte[] key = Tuple.from("iceberg-rest-server", "table", namespace, table).pack();
+            byte[] existing = context.ensureActive().get(key).join();
+            if (existing == null) {
+                throw new TableStore.TableNotFoundException("Table not found: " + namespace + "." + table);
+            }
+
+            String existingResponseJson = new String(existing, StandardCharsets.UTF_8);
+            String updatedResponseJson = IcebergRestServer.applyCommitToTableResponseJson(existingResponseJson, commitRequestBody);
+            context.ensureActive().set(key, updatedResponseJson.getBytes(StandardCharsets.UTF_8));
+            return updatedResponseJson;
+        });
+    }
+
+    @Override
     public List<String> listTables(String namespace) {
         return database.run(context -> {
             byte[] prefix = Tuple.from("iceberg-rest-server", "table", namespace).pack();
