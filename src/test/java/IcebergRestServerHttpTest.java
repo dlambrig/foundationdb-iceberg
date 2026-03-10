@@ -96,6 +96,17 @@ class IcebergRestServerHttpTest {
     }
 
     @Test
+    void createTableRejectsDuplicateTableName() throws Exception {
+        request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
+        String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables", tableBody).statusCode);
+
+        HttpResponse duplicate = request("POST", "/v1/namespaces/analytics/tables", tableBody);
+        assertEquals(409, duplicate.statusCode);
+        assertEquals("CommitFailedException", MAPPER.readTree(duplicate.body).path("error").path("type").asText());
+    }
+
+    @Test
     void listTablesReturnsMultipleTables() throws Exception {
         request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
 
@@ -146,6 +157,36 @@ class IcebergRestServerHttpTest {
                 "/v1/namespaces/analytics/tables/orders",
                 "{\"requirements\":[{\"type\":\"assert-ref-snapshot-id\",\"snapshot-id\":null}],\"updates\":[]}");
         assertEquals(400, malformedAssertRef.statusCode);
+
+        HttpResponse assertCreate = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":\"assert-create\"}],\"updates\":[]}");
+        assertEquals(409, assertCreate.statusCode);
+
+        HttpResponse assertPartitionConflict = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":\"assert-last-assigned-partition-id\",\"last-assigned-partition-id\":1000}],\"updates\":[]}");
+        assertEquals(409, assertPartitionConflict.statusCode);
+
+        HttpResponse assertPartitionMalformed = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":\"assert-last-assigned-partition-id\",\"last-assigned-partition-id\":\"abc\"}],\"updates\":[]}");
+        assertEquals(400, assertPartitionMalformed.statusCode);
+
+        HttpResponse assertDefaultSpecConflict = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":\"assert-default-spec-id\",\"default-spec-id\":1}],\"updates\":[]}");
+        assertEquals(409, assertDefaultSpecConflict.statusCode);
+
+        HttpResponse assertDefaultSpecMalformed = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":\"assert-default-spec-id\",\"default-spec-id\":\"abc\"}],\"updates\":[]}");
+        assertEquals(400, assertDefaultSpecMalformed.statusCode);
     }
 
     @Test

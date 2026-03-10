@@ -4,6 +4,7 @@ This harness starts:
 - `IcebergRestServer` (in-memory mode) on `:8181`
 - Trino server pointed at your existing `~/trino/etc` config
 - non-interactive SQL checks via `trino-cli --execute`
+- direct REST checks via `curl` (for commit requirement behavior like `assert-create`)
 
 ## Run
 

@@ -48,6 +48,10 @@ docker cp fdb:/var/fdb/fdb.cluster ./fdb.cluster
   - table rename (`POST /v1/tables/rename`)
   - staged create behavior (`stage-create=true` returns load response without persisting table)
   - table commit updates (including snapshot and schema-evolution paths used in current tests)
+  - `assert-create` requirement handling on commit path (conflicts on existing tables)
+  - `assert-last-assigned-partition-id` requirement validation
+  - `assert-default-spec-id` requirement validation
+  - duplicate table create rejected with conflict (`409`)
   - strict validation for unknown commit requirement types and malformed `assert-ref-snapshot-id` payloads
   - metrics endpoint stub used by Trino
 - Error responses are formatted for Iceberg REST clients.

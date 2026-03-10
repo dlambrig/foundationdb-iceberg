@@ -232,6 +232,45 @@ run_and_expect_fail() {
   fi
 }
 
+run_http_expect() {
+  local name="$1"
+  local method="$2"
+  local url="$3"
+  local payload="${4:-}"
+  local expected_status="$5"
+  local expected_body_pattern="${6:-}"
+
+  echo "==> ${name}"
+  local response
+  if [[ -n "${payload}" ]]; then
+    response="$(curl -sS -X "${method}" -H "Content-Type: application/json" \
+      -d "${payload}" -w $'\nHTTP_STATUS:%{http_code}' "${url}")"
+  else
+    response="$(curl -sS -X "${method}" -w $'\nHTTP_STATUS:%{http_code}' "${url}")"
+  fi
+
+  local status="${response##*HTTP_STATUS:}"
+  local body="${response%$'\n'HTTP_STATUS:*}"
+
+  if [[ "${status}" != "${expected_status}" ]]; then
+    echo "HTTP assertion failed for: ${name}" >&2
+    echo "Expected status: ${expected_status}, got: ${status}" >&2
+    echo "Body:" >&2
+    echo "${body}" >&2
+    exit 1
+  fi
+
+  if [[ -n "${expected_body_pattern}" ]]; then
+    if ! grep -Eq "${expected_body_pattern}" <<<"${body}"; then
+      echo "HTTP body assertion failed for: ${name}" >&2
+      echo "Expected pattern: ${expected_body_pattern}" >&2
+      echo "Actual body:" >&2
+      echo "${body}" >&2
+      exit 1
+    fi
+  fi
+}
+
 require_port_free 8181 "Server"
 require_port_free 8080 "Trino server"
 if [[ "${SERVER_MODE}" == "fdb" ]]; then
@@ -264,6 +303,21 @@ run_and_expect "Create schema" \
 run_and_expect "Create table" \
   "CREATE TABLE iceberg.${SCHEMA}.${TABLE} (order_id BIGINT, order_date DATE, amount DOUBLE)" \
   "CREATE TABLE"
+
+run_and_expect_fail "Duplicate table create fails" \
+  "CREATE TABLE iceberg.${SCHEMA}.${TABLE} (order_id BIGINT, order_date DATE, amount DOUBLE)" \
+  "already exists|Table .* already exists"
+
+ASSERT_CREATE_PAYLOAD=$(cat <<EOF
+{"requirements":[{"type":"assert-create"}],"updates":[]}
+EOF
+)
+run_http_expect "assert-create commit fails on existing table" \
+  "POST" \
+  "http://localhost:8181/v1/namespaces/${SCHEMA}/tables/${TABLE}" \
+  "${ASSERT_CREATE_PAYLOAD}" \
+  "409" \
+  "assert-create failed"
 
 run_and_expect "Insert rows" \
   "INSERT INTO iceberg.${SCHEMA}.${TABLE} VALUES (1, DATE '2026-03-08', 100.50), (2, DATE '2026-03-09', 42.00)" \
