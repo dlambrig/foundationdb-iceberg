@@ -165,6 +165,57 @@ class IcebergRestServerLogicTest {
     }
 
     @Test
+    void commitRejectsUnknownRequirementType() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String commit = """
+                {
+                  "requirements":[{"type":"assert-unknown","value":"x"}],
+                  "updates":[]
+                }
+                """;
+        IllegalArgumentException ex = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, commit));
+        assertTrue(ex.getMessage().contains("Unsupported requirement type"));
+    }
+
+    @Test
+    void assertRefSnapshotIdRejectsMalformedFields() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String missingRef = """
+                {"requirements":[{"type":"assert-ref-snapshot-id","snapshot-id":null}],"updates":[]}
+                """;
+        IllegalArgumentException ex1 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, missingRef));
+        assertTrue(ex1.getMessage().contains("non-empty ref"));
+
+        String missingSnapshotId = """
+                {"requirements":[{"type":"assert-ref-snapshot-id","ref":"main"}],"updates":[]}
+                """;
+        IllegalArgumentException ex2 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, missingSnapshotId));
+        assertTrue(ex2.getMessage().contains("requires snapshot-id"));
+
+        String wrongSnapshotIdType = """
+                {"requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":"abc"}],"updates":[]}
+                """;
+        IllegalArgumentException ex3 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, wrongSnapshotIdType));
+        assertTrue(ex3.getMessage().contains("must be an integer or null"));
+    }
+
+    @Test
     void resolveWritablePathHandlesLocalAndFileSchemes() {
         Path localPath = IcebergRestServer.resolveWritablePath("local:///iceberg_warehouse/a/b/c.metadata.json");
         assertTrue(localPath.toString().contains("iceberg_warehouse"));
