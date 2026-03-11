@@ -138,6 +138,18 @@ class IcebergRestServerHttpTest {
                 "/v1/namespaces/analytics/tables/orders",
                 "{\"updates\":[{\"action\":\"set-snapshot-ref\",\"ref-name\":\"main\"}]}");
         assertEquals(400, missingFields.statusCode);
+
+        HttpResponse malformedSetProperties = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"updates\":[{\"action\":\"set-properties\",\"updates\":\"nope\"}]}");
+        assertEquals(400, malformedSetProperties.statusCode);
+
+        HttpResponse malformedRemoveProperties = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"updates\":[{\"action\":\"remove-properties\",\"removals\":\"nope\"}]}");
+        assertEquals(400, malformedRemoveProperties.statusCode);
     }
 
     @Test
@@ -330,6 +342,24 @@ class IcebergRestServerHttpTest {
                 """;
         assertEquals(200, request("POST", "/v1/namespaces/analytics/tables/orders", schemaCommit).statusCode);
 
+        String setPropertiesCommit = """
+                {
+                  "updates":[
+                    {"action":"set-properties","updates":{"owner":"analytics-team","retention_days":"90"}}
+                  ]
+                }
+                """;
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables/orders", setPropertiesCommit).statusCode);
+
+        String removePropertiesCommit = """
+                {
+                  "updates":[
+                    {"action":"remove-properties","removals":["retention_days"]}
+                  ]
+                }
+                """;
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables/orders", removePropertiesCommit).statusCode);
+
         HttpResponse get = request("GET", "/v1/namespaces/analytics/tables/orders", null);
         assertEquals(200, get.statusCode);
         JsonNode metadata = MAPPER.readTree(get.body).path("metadata");
@@ -343,6 +373,8 @@ class IcebergRestServerHttpTest {
         assertEquals(1001L, metadata.path("statistics").get(0).path("snapshot-id").asLong());
         assertEquals(2, metadata.path("current-schema-id").asInt());
         assertEquals(2, metadata.path("last-column-id").asInt());
+        assertEquals("analytics-team", metadata.path("properties").path("owner").asText());
+        assertTrue(metadata.path("properties").path("retention_days").isMissingNode());
     }
 
     private HttpResponse request(String method, String path, String body) throws Exception {

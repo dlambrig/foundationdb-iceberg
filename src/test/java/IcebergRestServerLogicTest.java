@@ -145,6 +145,61 @@ class IcebergRestServerLogicTest {
                 IllegalArgumentException.class,
                 () -> IcebergRestServer.applyCommitToTableResponseJson(base, missingSnapshotFields));
         assertTrue(missing.getMessage().contains("snapshot-id"));
+
+        String malformedSetProperties = """
+                {"updates":[{"action":"set-properties","updates":"not-an-object"}]}
+                """;
+        IllegalArgumentException malformed = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, malformedSetProperties));
+        assertTrue(malformed.getMessage().contains("set-properties requires updates object"));
+    }
+
+    @Test
+    void setPropertiesUpdateMutatesTableProperties() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String setProps = """
+                {"updates":[{"action":"set-properties","updates":{"owner":"data-platform","retention_days":"30"}}]}
+                """;
+        String updated = IcebergRestServer.applyCommitToTableResponseJson(base, setProps);
+        JsonNode properties = MAPPER.readTree(updated).path("metadata").path("properties");
+
+        assertEquals("data-platform", properties.path("owner").asText());
+        assertEquals("30", properties.path("retention_days").asText());
+    }
+
+    @Test
+    void removePropertiesUpdateRemovesKeysAndValidatesPayload() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String seedProps = """
+                {"updates":[{"action":"set-properties","updates":{"owner":"data-platform","retention_days":"30","env":"dev"}}]}
+                """;
+        String withProps = IcebergRestServer.applyCommitToTableResponseJson(base, seedProps);
+
+        String removeProps = """
+                {"updates":[{"action":"remove-properties","removals":["retention_days","missing_key"]}]}
+                """;
+        String updated = IcebergRestServer.applyCommitToTableResponseJson(withProps, removeProps);
+        JsonNode properties = MAPPER.readTree(updated).path("metadata").path("properties");
+        assertEquals("data-platform", properties.path("owner").asText());
+        assertEquals("dev", properties.path("env").asText());
+        assertTrue(properties.path("retention_days").isMissingNode());
+
+        String malformed = """
+                {"updates":[{"action":"remove-properties","removals":"not-an-array"}]}
+                """;
+        IllegalArgumentException ex = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(withProps, malformed));
+        assertTrue(ex.getMessage().contains("remove-properties requires removals array"));
     }
 
     @Test

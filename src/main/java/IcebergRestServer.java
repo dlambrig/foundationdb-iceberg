@@ -300,6 +300,25 @@ public class IcebergRestServer {
                     }
                     metadata.put("current-schema-id", schemaId);
                 }
+            } else if ("set-properties".equals(action)) {
+                JsonNode updates = updateNode.get("updates");
+                if (updates == null || !updates.isObject()) {
+                    throw new IllegalArgumentException("set-properties requires updates object");
+                }
+                ObjectNode properties = ensureObject(metadata, "properties");
+                updates.fields().forEachRemaining(entry -> properties.put(entry.getKey(), entry.getValue().asText("")));
+            } else if ("remove-properties".equals(action)) {
+                JsonNode removals = updateNode.get("removals");
+                if (removals == null || !removals.isArray()) {
+                    throw new IllegalArgumentException("remove-properties requires removals array");
+                }
+                ObjectNode properties = ensureObject(metadata, "properties");
+                for (JsonNode removal : removals) {
+                    if (!removal.isTextual() || removal.asText("").isEmpty()) {
+                        throw new IllegalArgumentException("remove-properties removals must contain non-empty string keys");
+                    }
+                    properties.remove(removal.asText());
+                }
             } else {
                 throw new IllegalArgumentException("Unsupported update action: " + action);
             }
