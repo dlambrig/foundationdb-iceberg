@@ -5,26 +5,34 @@ import java.util.List;
 import java.util.Map;
 
 class InMemoryTableStore implements TableStore {
-    private final Map<String, String> tables = new HashMap<>();
+    private final Map<String, String> tableMetadataLocations = new HashMap<>();
 
     @Override
     public synchronized String getTableResponse(String namespace, String table) {
-        return tables.get(key(namespace, table));
+        String metadataLocation = tableMetadataLocations.get(key(namespace, table));
+        if (metadataLocation == null) {
+            return null;
+        }
+        return IcebergRestServer.loadTableResponseFromMetadataLocation(metadataLocation);
     }
 
     @Override
     public synchronized void putTableResponse(String namespace, String table, String responseJson) {
-        tables.put(key(namespace, table), responseJson);
+        String metadataLocation = IcebergRestServer.extractMetadataLocation(responseJson);
+        tableMetadataLocations.put(key(namespace, table), metadataLocation);
     }
 
     @Override
     public synchronized String commitTable(String namespace, String table, String commitRequestBody) {
-        String existingResponseJson = tables.get(key(namespace, table));
-        if (existingResponseJson == null) {
+        String currentMetadataLocation = tableMetadataLocations.get(key(namespace, table));
+        if (currentMetadataLocation == null) {
             throw new TableStore.TableNotFoundException("Table not found: " + namespace + "." + table);
         }
+        String existingResponseJson = IcebergRestServer.loadTableResponseFromMetadataLocation(currentMetadataLocation);
         String updatedResponseJson = IcebergRestServer.applyCommitToTableResponseJson(existingResponseJson, commitRequestBody);
-        tables.put(key(namespace, table), updatedResponseJson);
+        String updatedMetadataLocation = IcebergRestServer.extractMetadataLocation(updatedResponseJson);
+        IcebergRestServer.persistMetadataFile(updatedResponseJson);
+        tableMetadataLocations.put(key(namespace, table), updatedMetadataLocation);
         return updatedResponseJson;
     }
 
@@ -32,7 +40,7 @@ class InMemoryTableStore implements TableStore {
     public synchronized List<String> listTables(String namespace) {
         List<String> results = new ArrayList<>();
         String prefix = namespace + ".";
-        for (String key : tables.keySet()) {
+        for (String key : tableMetadataLocations.keySet()) {
             if (key.startsWith(prefix)) {
                 results.add(key.substring(prefix.length()));
             }
@@ -43,17 +51,17 @@ class InMemoryTableStore implements TableStore {
 
     @Override
     public synchronized boolean deleteTable(String namespace, String table) {
-        return tables.remove(key(namespace, table)) != null;
+        return tableMetadataLocations.remove(key(namespace, table)) != null;
     }
 
     @Override
     public synchronized boolean renameTable(String sourceNamespace, String sourceTable, String targetNamespace, String targetTable) {
         String sourceKey = key(sourceNamespace, sourceTable);
         String targetKey = key(targetNamespace, targetTable);
-        if (!tables.containsKey(sourceKey) || tables.containsKey(targetKey)) {
+        if (!tableMetadataLocations.containsKey(sourceKey) || tableMetadataLocations.containsKey(targetKey)) {
             return false;
         }
-        tables.put(targetKey, tables.remove(sourceKey));
+        tableMetadataLocations.put(targetKey, tableMetadataLocations.remove(sourceKey));
         return true;
     }
 

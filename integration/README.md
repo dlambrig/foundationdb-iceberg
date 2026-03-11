@@ -5,6 +5,7 @@ This harness starts:
 - Trino server pointed at your existing `~/trino/etc` config
 - non-interactive SQL checks via `trino-cli --execute`
 - direct REST checks via `curl` (for commit requirement behavior like `assert-create`)
+- metadata pointer transition checks (`metadata-location` advancing from `00000` to `00001`/`00002`)
 
 ## Run
 

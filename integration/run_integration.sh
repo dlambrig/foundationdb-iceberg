@@ -271,6 +271,22 @@ run_http_expect() {
   fi
 }
 
+extract_json_field() {
+  local json="$1"
+  local field="$2"
+  echo "${json}" | sed -nE "s/.*\"${field}\":\"([^\"]+)\".*/\\1/p"
+}
+
+extract_last_path_segment() {
+  local uri="$1"
+  echo "${uri##*/}"
+}
+
+extract_metadata_version() {
+  local filename="$1"
+  echo "${filename}" | sed -nE 's/^([0-9]+)-.*\.metadata\.json$/\1/p'
+}
+
 require_port_free 8181 "Server"
 require_port_free 8080 "Trino server"
 if [[ "${SERVER_MODE}" == "fdb" ]]; then
@@ -280,7 +296,11 @@ fi
 echo "Starting server..."
 (
   cd "${PROJECT_ROOT}"
-  ./gradlew runIcebergRestServer "${SERVER_GRADLE_ARGS[@]}"
+  if [[ ${#SERVER_GRADLE_ARGS[@]} -gt 0 ]]; then
+    ./gradlew runIcebergRestServer "${SERVER_GRADLE_ARGS[@]}"
+  else
+    ./gradlew runIcebergRestServer
+  fi
 ) >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
 
@@ -295,6 +315,7 @@ wait_for_trino
 SCHEMA="it_${RUN_ID}"
 TABLE="orders_${RUN_ID}"
 RENAMED_TABLE="orders_renamed_${RUN_ID}"
+POINTER_TABLE="pointer_${RUN_ID}"
 
 run_and_expect "Create schema" \
   "CREATE SCHEMA IF NOT EXISTS iceberg.${SCHEMA}" \
@@ -318,6 +339,86 @@ run_http_expect "assert-create commit fails on existing table" \
   "${ASSERT_CREATE_PAYLOAD}" \
   "409" \
   "assert-create failed"
+
+echo "==> Metadata pointer advances across commits"
+POINTER_CREATE_PAYLOAD=$(cat <<EOF
+{"name":"${POINTER_TABLE}","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"long"}]}}
+EOF
+)
+run_http_expect "Create REST-only pointer test table" \
+  "POST" \
+  "http://localhost:8181/v1/namespaces/${SCHEMA}/tables" \
+  "${POINTER_CREATE_PAYLOAD}" \
+  "200"
+
+GET_BEFORE="$(curl -sS -X GET "http://localhost:8181/v1/namespaces/${SCHEMA}/tables/${POINTER_TABLE}")"
+LOC_BEFORE="$(extract_json_field "${GET_BEFORE}" "metadata-location")"
+FILE_BEFORE="$(extract_last_path_segment "${LOC_BEFORE}")"
+VER_BEFORE="$(extract_metadata_version "${FILE_BEFORE}")"
+if [[ -z "${LOC_BEFORE}" ]]; then
+  echo "Expected metadata-location before commit, got empty" >&2
+  exit 1
+fi
+if [[ -z "${VER_BEFORE}" ]]; then
+  echo "Unexpected metadata filename before commit: ${FILE_BEFORE}" >&2
+  exit 1
+fi
+
+SNAP1=$((100000 + RANDOM))
+COMMIT1=$(cat <<EOF
+{"updates":[{"action":"add-snapshot","snapshot":{"sequence-number":1,"snapshot-id":${SNAP1},"timestamp-ms":1773000000001,"schema-id":0}},{"action":"set-snapshot-ref","ref-name":"main","snapshot-id":${SNAP1},"type":"branch"}]}
+EOF
+)
+run_http_expect "Commit #1 for metadata pointer test" \
+  "POST" \
+  "http://localhost:8181/v1/namespaces/${SCHEMA}/tables/${POINTER_TABLE}" \
+  "${COMMIT1}" \
+  "200"
+
+GET_AFTER1="$(curl -sS -X GET "http://localhost:8181/v1/namespaces/${SCHEMA}/tables/${POINTER_TABLE}")"
+LOC_AFTER1="$(extract_json_field "${GET_AFTER1}" "metadata-location")"
+FILE_AFTER1="$(extract_last_path_segment "${LOC_AFTER1}")"
+VER_AFTER1="$(extract_metadata_version "${FILE_AFTER1}")"
+if [[ "${LOC_AFTER1}" == "${LOC_BEFORE}" ]]; then
+  echo "metadata-location did not advance after first commit" >&2
+  exit 1
+fi
+if [[ -z "${VER_AFTER1}" ]]; then
+  echo "Unexpected metadata file after first commit: ${FILE_AFTER1}" >&2
+  exit 1
+fi
+if (( 10#${VER_AFTER1} != 10#${VER_BEFORE} + 1 )); then
+  echo "Metadata version did not increment by 1 after first commit: ${VER_BEFORE} -> ${VER_AFTER1}" >&2
+  exit 1
+fi
+
+SNAP2=$((200000 + RANDOM))
+COMMIT2=$(cat <<EOF
+{"updates":[{"action":"add-snapshot","snapshot":{"sequence-number":2,"snapshot-id":${SNAP2},"timestamp-ms":1773000000002,"schema-id":0}},{"action":"set-snapshot-ref","ref-name":"main","snapshot-id":${SNAP2},"type":"branch"}]}
+EOF
+)
+run_http_expect "Commit #2 for metadata pointer test" \
+  "POST" \
+  "http://localhost:8181/v1/namespaces/${SCHEMA}/tables/${POINTER_TABLE}" \
+  "${COMMIT2}" \
+  "200"
+
+GET_AFTER2="$(curl -sS -X GET "http://localhost:8181/v1/namespaces/${SCHEMA}/tables/${POINTER_TABLE}")"
+LOC_AFTER2="$(extract_json_field "${GET_AFTER2}" "metadata-location")"
+FILE_AFTER2="$(extract_last_path_segment "${LOC_AFTER2}")"
+VER_AFTER2="$(extract_metadata_version "${FILE_AFTER2}")"
+if [[ "${LOC_AFTER2}" == "${LOC_AFTER1}" ]]; then
+  echo "metadata-location did not advance after second commit" >&2
+  exit 1
+fi
+if [[ -z "${VER_AFTER2}" ]]; then
+  echo "Unexpected metadata file after second commit: ${FILE_AFTER2}" >&2
+  exit 1
+fi
+if (( 10#${VER_AFTER2} != 10#${VER_AFTER1} + 1 )); then
+  echo "Metadata version did not increment by 1 after second commit: ${VER_AFTER1} -> ${VER_AFTER2}" >&2
+  exit 1
+fi
 
 run_and_expect "Insert rows" \
   "INSERT INTO iceberg.${SCHEMA}.${TABLE} VALUES (1, DATE '2026-03-08', 100.50), (2, DATE '2026-03-09', 42.00)" \
@@ -358,6 +459,12 @@ run_and_expect_fail "Drop non-empty schema fails" \
 run_and_expect "Drop renamed table" \
   "DROP TABLE iceberg.${SCHEMA}.${RENAMED_TABLE}" \
   "DROP TABLE"
+
+run_http_expect "Drop REST-only pointer test table" \
+  "DELETE" \
+  "http://localhost:8181/v1/namespaces/${SCHEMA}/tables/${POINTER_TABLE}" \
+  "" \
+  "204"
 
 run_and_expect "Drop empty schema" \
   "DROP SCHEMA iceberg.${SCHEMA}" \

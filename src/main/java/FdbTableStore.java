@@ -18,7 +18,7 @@ class FdbTableStore implements TableStore {
 
     @Override
     public String getTableResponse(String namespace, String table) {
-        return database.run(context -> {
+        String metadataLocation = database.run(context -> {
             byte[] key = Tuple.from("iceberg-rest-server", "table", namespace, table).pack();
             byte[] value = context.ensureActive().get(key).join();
             if (value == null) {
@@ -26,13 +26,18 @@ class FdbTableStore implements TableStore {
             }
             return new String(value, StandardCharsets.UTF_8);
         });
+        if (metadataLocation == null) {
+            return null;
+        }
+        return IcebergRestServer.loadTableResponseFromMetadataLocation(metadataLocation);
     }
 
     @Override
     public void putTableResponse(String namespace, String table, String responseJson) {
+        String metadataLocation = IcebergRestServer.extractMetadataLocation(responseJson);
         database.run(context -> {
             byte[] key = Tuple.from("iceberg-rest-server", "table", namespace, table).pack();
-            context.ensureActive().set(key, responseJson.getBytes(StandardCharsets.UTF_8));
+            context.ensureActive().set(key, metadataLocation.getBytes(StandardCharsets.UTF_8));
             return null;
         });
     }
@@ -46,9 +51,12 @@ class FdbTableStore implements TableStore {
                 throw new TableStore.TableNotFoundException("Table not found: " + namespace + "." + table);
             }
 
-            String existingResponseJson = new String(existing, StandardCharsets.UTF_8);
+            String currentMetadataLocation = new String(existing, StandardCharsets.UTF_8);
+            String existingResponseJson = IcebergRestServer.loadTableResponseFromMetadataLocation(currentMetadataLocation);
             String updatedResponseJson = IcebergRestServer.applyCommitToTableResponseJson(existingResponseJson, commitRequestBody);
-            context.ensureActive().set(key, updatedResponseJson.getBytes(StandardCharsets.UTF_8));
+            String updatedMetadataLocation = IcebergRestServer.extractMetadataLocation(updatedResponseJson);
+            IcebergRestServer.persistMetadataFile(updatedResponseJson);
+            context.ensureActive().set(key, updatedMetadataLocation.getBytes(StandardCharsets.UTF_8));
             return updatedResponseJson;
         });
     }
