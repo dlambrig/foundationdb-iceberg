@@ -309,6 +309,7 @@ class IcebergRestServerLogicTest {
                 {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
                 """;
         String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+        IcebergRestServer.persistMetadataFile(base);
         store.putTableResponse("sales", "orders", base);
 
         String commit = """
@@ -358,6 +359,38 @@ class IcebergRestServerLogicTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void commitAdvancesMetadataPointerAndAppendsMetadataLog() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+        JsonNode baseRoot = MAPPER.readTree(base);
+        String initialLocation = baseRoot.path("metadata-location").asText();
+
+        String commit = """
+                {
+                  "requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null}],
+                  "updates":[
+                    {"action":"add-snapshot","snapshot":{"sequence-number":1,"snapshot-id":111,"timestamp-ms":1700000000000,"schema-id":0}},
+                    {"action":"set-snapshot-ref","ref-name":"main","snapshot-id":111,"type":"branch"}
+                  ]
+                }
+                """;
+        String updated = IcebergRestServer.applyCommitToTableResponseJson(base, commit);
+        JsonNode updatedRoot = MAPPER.readTree(updated);
+        String nextLocation = updatedRoot.path("metadata-location").asText();
+
+        assertTrue(initialLocation.endsWith(".metadata.json"));
+        assertTrue(nextLocation.endsWith(".metadata.json"));
+        assertTrue(nextLocation.contains("00001-"));
+        assertTrue(!initialLocation.equals(nextLocation));
+
+        JsonNode metadataLog = updatedRoot.path("metadata").path("metadata-log");
+        assertEquals(1, metadataLog.size());
+        assertEquals(initialLocation, metadataLog.get(0).path("metadata-file").asText());
     }
 
     @Test

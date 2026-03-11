@@ -19,6 +19,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.List;
 import java.util.Map;
 import java.util.LinkedHashMap;
@@ -33,6 +35,7 @@ public class IcebergRestServer {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final Path DEFAULT_LOCAL_ROOT = Paths.get(System.getProperty("java.io.tmpdir"));
     private static final String DEFAULT_WAREHOUSE_LOCATION = "local:///iceberg_warehouse";
+    private static final Pattern METADATA_FILE_PATTERN = Pattern.compile("^(\\d+)-(.+)\\.metadata\\.json$");
 
     private static NamespaceStore namespaceStore;
     private static TableStore tableStore;
@@ -195,6 +198,10 @@ public class IcebergRestServer {
             throw new IllegalArgumentException("Stored table metadata is invalid");
         }
         ObjectNode metadata = (ObjectNode) metadataNode;
+        String currentMetadataLocation = updatedRoot.path("metadata-location").asText("");
+        if (currentMetadataLocation.isEmpty()) {
+            throw new IllegalArgumentException("Stored table metadata-location is invalid");
+        }
 
         validateCommitRequirements(commitRoot, metadata);
 
@@ -202,6 +209,7 @@ public class IcebergRestServer {
         ObjectNode refs = ensureObject(metadata, "refs");
         ArrayNode statistics = ensureArray(metadata, "statistics");
         ArrayNode snapshotLog = ensureArray(metadata, "snapshot-log");
+        ArrayNode metadataLog = ensureArray(metadata, "metadata-log");
         ArrayNode schemas = ensureArray(metadata, "schemas");
 
         long maxSequence = metadata.path("last-sequence-number").asLong(0);
@@ -297,8 +305,17 @@ public class IcebergRestServer {
             }
         }
 
+        long now = System.currentTimeMillis();
         metadata.put("last-sequence-number", maxSequence);
-        metadata.put("last-updated-ms", System.currentTimeMillis());
+        metadata.put("last-updated-ms", now);
+        ObjectNode metadataLogEntry = OBJECT_MAPPER.createObjectNode();
+        metadataLogEntry.put("timestamp-ms", now);
+        metadataLogEntry.put("metadata-file", currentMetadataLocation);
+        metadataLog.add(metadataLogEntry);
+
+        String tableUuid = metadata.path("table-uuid").asText("");
+        String nextMetadataLocation = nextMetadataLocation(currentMetadataLocation, tableUuid);
+        updatedRoot.put("metadata-location", nextMetadataLocation);
 
         try {
             return OBJECT_MAPPER.writeValueAsString(updatedRoot);
@@ -422,6 +439,54 @@ public class IcebergRestServer {
         } catch (Exception e) {
             throw new RuntimeException("Failed to persist metadata file", e);
         }
+    }
+
+    static String extractMetadataLocation(String loadTableResponseJson) {
+        try {
+            JsonNode root = OBJECT_MAPPER.readTree(loadTableResponseJson);
+            String metadataLocation = root.path("metadata-location").asText("");
+            if (metadataLocation.isEmpty()) {
+                throw new IllegalArgumentException("Missing metadata-location");
+            }
+            return metadataLocation;
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Invalid JSON response payload");
+        }
+    }
+
+    static String loadTableResponseFromMetadataLocation(String metadataLocation) {
+        try {
+            Path metadataPath = resolveWritablePath(metadataLocation);
+            if (metadataPath == null) {
+                throw new IllegalArgumentException("Unsupported metadata-location scheme: " + metadataLocation);
+            }
+            String metadataContent = Files.readString(metadataPath, StandardCharsets.UTF_8);
+            JsonNode metadata = OBJECT_MAPPER.readTree(metadataContent);
+            ObjectNode response = OBJECT_MAPPER.createObjectNode();
+            response.put("metadata-location", metadataLocation);
+            response.set("metadata", metadata);
+            response.putObject("config");
+            return OBJECT_MAPPER.writeValueAsString(response);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to read metadata file: " + metadataLocation, e);
+        }
+    }
+
+    private static String nextMetadataLocation(String currentMetadataLocation, String tableUuid) {
+        URI uri = URI.create(currentMetadataLocation);
+        Path currentPath = Paths.get(uri.getPath());
+        String fileName = currentPath.getFileName().toString();
+        Matcher matcher = METADATA_FILE_PATTERN.matcher(fileName);
+        if (!matcher.matches()) {
+            throw new IllegalArgumentException("Invalid metadata file name: " + fileName);
+        }
+
+        int currentVersion = Integer.parseInt(matcher.group(1));
+        String effectiveUuid = (tableUuid == null || tableUuid.isEmpty()) ? matcher.group(2) : tableUuid;
+        String nextFileName = String.format("%05d-%s.metadata.json", currentVersion + 1, effectiveUuid);
+        Path nextPath = currentPath.getParent().resolve(nextFileName);
+
+        return URI.create(uri.getScheme() + "://" + nextPath.toString()).toString();
     }
 
     static Path resolveWritablePath(String location) {
@@ -736,10 +801,6 @@ public class IcebergRestServer {
             }
 
             String normalizedResponseJson = normalizeMetadataLocation(updatedResponseJson);
-            if (!normalizedResponseJson.equals(updatedResponseJson)) {
-                tableStore.putTableResponse(namespace, table, normalizedResponseJson);
-            }
-            IcebergRestServer.persistMetadataFile(normalizedResponseJson);
             sendJson(exchange, 200, normalizedResponseJson, method, path);
         }
 
