@@ -203,6 +203,29 @@ class IcebergRestServerLogicTest {
     }
 
     @Test
+    void setLocationUpdateMutatesTableLocationAndValidatesPayload() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String setLocation = """
+                {"updates":[{"action":"set-location","location":"local:///iceberg_warehouse_custom/sales/orders"}]}
+                """;
+        String updated = IcebergRestServer.applyCommitToTableResponseJson(base, setLocation);
+        JsonNode metadata = MAPPER.readTree(updated).path("metadata");
+        assertEquals("local:///iceberg_warehouse_custom/sales/orders", metadata.path("location").asText());
+
+        String malformed = """
+                {"updates":[{"action":"set-location","location":"not-a-uri"}]}
+                """;
+        IllegalArgumentException ex = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, malformed));
+        assertTrue(ex.getMessage().contains("set-location requires valid URI location"));
+    }
+
+    @Test
     void repeatedCommitWithSameRequirementConflicts() throws Exception {
         String createRequest = """
                 {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
@@ -355,6 +378,36 @@ class IcebergRestServerLogicTest {
                 IllegalArgumentException.class,
                 () -> IcebergRestServer.applyCommitToTableResponseJson(base, malformed));
         assertTrue(ex2.getMessage().contains("requires integer default-spec-id"));
+    }
+
+    @Test
+    void assertDefaultSortOrderIdSupportsSuccessConflictAndBadPayload() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String success = """
+                {"requirements":[{"type":"assert-default-sort-order-id","default-sort-order-id":0}],"updates":[]}
+                """;
+        String unchanged = IcebergRestServer.applyCommitToTableResponseJson(base, success);
+        assertEquals(0L, MAPPER.readTree(unchanged).path("metadata").path("default-sort-order-id").asLong());
+
+        String conflict = """
+                {"requirements":[{"type":"assert-default-sort-order-id","default-sort-order-id":1}],"updates":[]}
+                """;
+        IllegalStateException ex1 = assertThrows(
+                IllegalStateException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, conflict));
+        assertTrue(ex1.getMessage().contains("assert-default-sort-order-id failed"));
+
+        String malformed = """
+                {"requirements":[{"type":"assert-default-sort-order-id","default-sort-order-id":"abc"}],"updates":[]}
+                """;
+        IllegalArgumentException ex2 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, malformed));
+        assertTrue(ex2.getMessage().contains("requires integer default-sort-order-id"));
     }
 
     @Test

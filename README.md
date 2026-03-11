@@ -52,8 +52,10 @@ docker cp fdb:/var/fdb/fdb.cluster ./fdb.cluster
   - `assert-create` requirement handling on commit path (conflicts on existing tables)
   - `assert-last-assigned-partition-id` requirement validation
   - `assert-default-spec-id` requirement validation
+  - `assert-default-sort-order-id` requirement validation
   - duplicate table create rejected with conflict (`409`)
   - strict validation for unknown commit requirement types and malformed `assert-ref-snapshot-id` payloads
+  - table location updates via commit action (`set-location`)
   - metrics endpoint stub used by Trino
 - Error responses are formatted for Iceberg REST clients.
 - Integration harness can start server + Trino, run SQL, and validate expected results.
