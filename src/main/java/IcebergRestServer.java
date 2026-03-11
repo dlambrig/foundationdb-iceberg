@@ -319,6 +319,21 @@ public class IcebergRestServer {
                     }
                     properties.remove(removal.asText());
                 }
+            } else if ("set-location".equals(action)) {
+                JsonNode locationNode = updateNode.get("location");
+                if (locationNode == null || !locationNode.isTextual() || locationNode.asText("").isEmpty()) {
+                    throw new IllegalArgumentException("set-location requires non-empty location");
+                }
+                String location = locationNode.asText();
+                try {
+                    URI parsed = URI.create(location);
+                    if (parsed.getScheme() == null || parsed.getScheme().isEmpty()) {
+                        throw new IllegalArgumentException("set-location requires absolute URI location");
+                    }
+                } catch (IllegalArgumentException e) {
+                    throw new IllegalArgumentException("set-location requires valid URI location");
+                }
+                metadata.put("location", location);
             } else {
                 throw new IllegalArgumentException("Unsupported update action: " + action);
             }
@@ -430,6 +445,16 @@ public class IcebergRestServer {
                 long actual = metadata.path("default-spec-id").asLong(Long.MIN_VALUE);
                 if (expected == Long.MIN_VALUE || expected != actual) {
                     throw new IllegalStateException("assert-default-spec-id failed");
+                }
+            } else if ("assert-default-sort-order-id".equals(type)) {
+                JsonNode expectedNode = requirement.get("default-sort-order-id");
+                if (expectedNode == null || !expectedNode.canConvertToLong()) {
+                    throw new IllegalArgumentException("assert-default-sort-order-id requires integer default-sort-order-id");
+                }
+                long expected = expectedNode.asLong(Long.MIN_VALUE);
+                long actual = metadata.path("default-sort-order-id").asLong(Long.MIN_VALUE);
+                if (expected == Long.MIN_VALUE || expected != actual) {
+                    throw new IllegalStateException("assert-default-sort-order-id failed");
                 }
             } else {
                 throw new IllegalArgumentException("Unsupported requirement type: " + type);

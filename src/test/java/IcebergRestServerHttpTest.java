@@ -150,6 +150,12 @@ class IcebergRestServerHttpTest {
                 "/v1/namespaces/analytics/tables/orders",
                 "{\"updates\":[{\"action\":\"remove-properties\",\"removals\":\"nope\"}]}");
         assertEquals(400, malformedRemoveProperties.statusCode);
+
+        HttpResponse malformedSetLocation = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"updates\":[{\"action\":\"set-location\",\"location\":\"not-a-uri\"}]}");
+        assertEquals(400, malformedSetLocation.statusCode);
     }
 
     @Test
@@ -199,6 +205,18 @@ class IcebergRestServerHttpTest {
                 "/v1/namespaces/analytics/tables/orders",
                 "{\"requirements\":[{\"type\":\"assert-default-spec-id\",\"default-spec-id\":\"abc\"}],\"updates\":[]}");
         assertEquals(400, assertDefaultSpecMalformed.statusCode);
+
+        HttpResponse assertDefaultSortOrderConflict = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":\"assert-default-sort-order-id\",\"default-sort-order-id\":1}],\"updates\":[]}");
+        assertEquals(409, assertDefaultSortOrderConflict.statusCode);
+
+        HttpResponse assertDefaultSortOrderMalformed = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":\"assert-default-sort-order-id\",\"default-sort-order-id\":\"abc\"}],\"updates\":[]}");
+        assertEquals(400, assertDefaultSortOrderMalformed.statusCode);
     }
 
     @Test
@@ -360,6 +378,15 @@ class IcebergRestServerHttpTest {
                 """;
         assertEquals(200, request("POST", "/v1/namespaces/analytics/tables/orders", removePropertiesCommit).statusCode);
 
+        String setLocationCommit = """
+                {
+                  "updates":[
+                    {"action":"set-location","location":"local:///iceberg_warehouse_custom/analytics/orders"}
+                  ]
+                }
+                """;
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables/orders", setLocationCommit).statusCode);
+
         HttpResponse get = request("GET", "/v1/namespaces/analytics/tables/orders", null);
         assertEquals(200, get.statusCode);
         JsonNode metadata = MAPPER.readTree(get.body).path("metadata");
@@ -373,6 +400,7 @@ class IcebergRestServerHttpTest {
         assertEquals(1001L, metadata.path("statistics").get(0).path("snapshot-id").asLong());
         assertEquals(2, metadata.path("current-schema-id").asInt());
         assertEquals(2, metadata.path("last-column-id").asInt());
+        assertEquals("local:///iceberg_warehouse_custom/analytics/orders", metadata.path("location").asText());
         assertEquals("analytics-team", metadata.path("properties").path("owner").asText());
         assertTrue(metadata.path("properties").path("retention_days").isMissingNode());
     }
