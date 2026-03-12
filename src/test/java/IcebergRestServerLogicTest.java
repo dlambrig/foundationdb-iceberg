@@ -94,6 +94,100 @@ class IcebergRestServerLogicTest {
     }
 
     @Test
+    void removeStatisticsRemovesOnlyMatchingSnapshotEntries() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String seeded = """
+                {
+                  "updates": [
+                    {"action":"add-snapshot","snapshot":{"sequence-number":1,"snapshot-id":101,"timestamp-ms":1700000000000,"schema-id":0}},
+                    {"action":"add-snapshot","snapshot":{"sequence-number":2,"snapshot-id":202,"timestamp-ms":1700000001000,"schema-id":0}},
+                    {"action":"set-statistics","statistics":{"snapshot-id":101,"statistics-path":"local:///iceberg_warehouse/sales/orders/metadata/stats-101"}},
+                    {"action":"set-statistics","statistics":{"snapshot-id":202,"statistics-path":"local:///iceberg_warehouse/sales/orders/metadata/stats-202"}}
+                  ]
+                }
+                """;
+        String withStats = IcebergRestServer.applyCommitToTableResponseJson(base, seeded);
+
+        String removeOne = """
+                {"updates":[{"action":"remove-statistics","snapshot-ids":[202,999]}]}
+                """;
+        String updated = IcebergRestServer.applyCommitToTableResponseJson(withStats, removeOne);
+        JsonNode statistics = MAPPER.readTree(updated).path("metadata").path("statistics");
+        assertEquals(1, statistics.size());
+        assertEquals(101L, statistics.get(0).path("snapshot-id").asLong());
+    }
+
+    @Test
+    void setPartitionStatisticsValidatesSnapshotContextAndUpserts() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String withSnapshot = """
+                {
+                  "updates": [
+                    {"action":"add-snapshot","snapshot":{"sequence-number":1,"snapshot-id":101,"timestamp-ms":1700000000000,"schema-id":0}}
+                  ]
+                }
+                """;
+        String seeded = IcebergRestServer.applyCommitToTableResponseJson(base, withSnapshot);
+
+        String setPartitionStats = """
+                {
+                  "updates": [
+                    {"action":"set-partition-statistics","partition-statistics":{"snapshot-id":101,"statistics-path":"local:///iceberg_warehouse/sales/orders/metadata/part-stats-101-v1"}}
+                  ]
+                }
+                """;
+        String first = IcebergRestServer.applyCommitToTableResponseJson(seeded, setPartitionStats);
+        JsonNode firstStats = MAPPER.readTree(first).path("metadata").path("partition-statistics");
+        assertEquals(1, firstStats.size());
+        assertEquals("local:///iceberg_warehouse/sales/orders/metadata/part-stats-101-v1", firstStats.get(0).path("statistics-path").asText());
+
+        String upsertPartitionStats = """
+                {
+                  "updates": [
+                    {"action":"set-partition-statistics","partition-statistics":{"snapshot-id":101,"statistics-path":"local:///iceberg_warehouse/sales/orders/metadata/part-stats-101-v2"}}
+                  ]
+                }
+                """;
+        String second = IcebergRestServer.applyCommitToTableResponseJson(first, upsertPartitionStats);
+        JsonNode secondStats = MAPPER.readTree(second).path("metadata").path("partition-statistics");
+        assertEquals(1, secondStats.size());
+        assertEquals("local:///iceberg_warehouse/sales/orders/metadata/part-stats-101-v2", secondStats.get(0).path("statistics-path").asText());
+
+        String unknownSnapshot = """
+                {
+                  "updates": [
+                    {"action":"set-partition-statistics","partition-statistics":{"snapshot-id":999,"statistics-path":"local:///iceberg_warehouse/sales/orders/metadata/part-stats-999"}}
+                  ]
+                }
+                """;
+        IllegalArgumentException ex1 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(seeded, unknownSnapshot));
+        assertTrue(ex1.getMessage().contains("unknown snapshot-id"));
+
+        String unknownSchemaSnapshot = """
+                {
+                  "updates": [
+                    {"action":"add-snapshot","snapshot":{"sequence-number":2,"snapshot-id":202,"timestamp-ms":1700000001000,"schema-id":7}},
+                    {"action":"set-partition-statistics","partition-statistics":{"snapshot-id":202,"statistics-path":"local:///iceberg_warehouse/sales/orders/metadata/part-stats-202"}}
+                  ]
+                }
+                """;
+        IllegalArgumentException ex2 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(seeded, unknownSchemaSnapshot));
+        assertTrue(ex2.getMessage().contains("unknown schema-id"));
+    }
+
+    @Test
     void setCurrentSchemaWithExplicitIdWorksAndUnknownIdFails() throws Exception {
         String createRequest = """
                 {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[
