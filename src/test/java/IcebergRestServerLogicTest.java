@@ -534,6 +534,38 @@ class IcebergRestServerLogicTest {
     }
 
     @Test
+    void assignUuidIsWriteOnceAndIdempotent() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+        String existingUuid = MAPPER.readTree(base).path("metadata").path("table-uuid").asText();
+        assertTrue(!existingUuid.isEmpty());
+
+        String sameUuid = """
+                {"updates":[{"action":"assign-uuid","uuid":"%s"}]}
+                """.formatted(existingUuid);
+        String unchanged = IcebergRestServer.applyCommitToTableResponseJson(base, sameUuid);
+        assertEquals(existingUuid, MAPPER.readTree(unchanged).path("metadata").path("table-uuid").asText());
+
+        String differentUuid = """
+                {"updates":[{"action":"assign-uuid","uuid":"00000000-0000-0000-0000-000000000001"}]}
+                """;
+        IllegalStateException ex1 = assertThrows(
+                IllegalStateException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, differentUuid));
+        assertTrue(ex1.getMessage().contains("cannot change existing table-uuid"));
+
+        String invalidUuid = """
+                {"updates":[{"action":"assign-uuid","uuid":"not-a-uuid"}]}
+                """;
+        IllegalArgumentException ex2 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, invalidUuid));
+        assertTrue(ex2.getMessage().contains("requires valid UUID"));
+    }
+
+    @Test
     void removeSnapshotRefSupportsValidRemovalAndMainProtection() throws Exception {
         String createRequest = """
                 {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[
