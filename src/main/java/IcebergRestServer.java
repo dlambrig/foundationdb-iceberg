@@ -660,6 +660,24 @@ public class IcebergRestServer {
                 if (requestedVersion > currentVersion) {
                     metadata.put("format-version", requestedVersion);
                 }
+            } else if ("assign-uuid".equals(action)) {
+                JsonNode uuidNode = updateNode.get("uuid");
+                if (uuidNode == null || !uuidNode.isTextual() || uuidNode.asText("").isEmpty()) {
+                    throw new IllegalArgumentException("assign-uuid requires non-empty uuid");
+                }
+                String requestedUuid = uuidNode.asText();
+                try {
+                    UUID.fromString(requestedUuid);
+                } catch (IllegalArgumentException e) {
+                    throw new IllegalArgumentException("assign-uuid requires valid UUID");
+                }
+
+                String currentUuid = metadata.path("table-uuid").asText("");
+                if (currentUuid.isEmpty()) {
+                    metadata.put("table-uuid", requestedUuid);
+                } else if (!currentUuid.equals(requestedUuid)) {
+                    throw new IllegalStateException("assign-uuid cannot change existing table-uuid");
+                }
             } else {
                 throw new IllegalArgumentException("Unsupported update action: " + action);
             }
