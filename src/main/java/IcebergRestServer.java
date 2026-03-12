@@ -644,6 +644,22 @@ public class IcebergRestServer {
                     throw new IllegalArgumentException("set-default-sort-order references unknown sort-order-id: " + sortOrderId);
                 }
                 metadata.put("default-sort-order-id", sortOrderId);
+            } else if ("upgrade-format-version".equals(action)) {
+                JsonNode formatVersionNode = updateNode.get("format-version");
+                if (formatVersionNode == null || !formatVersionNode.canConvertToInt()) {
+                    throw new IllegalArgumentException("upgrade-format-version requires integer format-version");
+                }
+                int currentVersion = metadata.path("format-version").asInt(Integer.MIN_VALUE);
+                int requestedVersion = formatVersionNode.asInt(Integer.MIN_VALUE);
+                if (currentVersion == Integer.MIN_VALUE || requestedVersion == Integer.MIN_VALUE) {
+                    throw new IllegalArgumentException("upgrade-format-version requires valid format-version values");
+                }
+                if (requestedVersion < currentVersion) {
+                    throw new IllegalStateException("upgrade-format-version cannot downgrade format-version from " + currentVersion + " to " + requestedVersion);
+                }
+                if (requestedVersion > currentVersion) {
+                    metadata.put("format-version", requestedVersion);
+                }
             } else {
                 throw new IllegalArgumentException("Unsupported update action: " + action);
             }
