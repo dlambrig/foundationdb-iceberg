@@ -362,6 +362,100 @@ class IcebergRestServerLogicTest {
     }
 
     @Test
+    void removePartitionSpecsEnforcesDefaultAndInUseProtections() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[
+                {"id":1,"name":"order_id","required":false,"type":"long"},
+                {"id":2,"name":"order_date","required":false,"type":"date"},
+                {"id":3,"name":"region","required":false,"type":"string"}
+                ]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String seeded = """
+                {
+                  "updates": [
+                    {"action":"add-spec","spec":{"spec-id":1,"fields":[{"source-id":2,"field-id":1000,"name":"order_day","transform":"day"}]}},
+                    {"action":"add-spec","spec":{"spec-id":2,"fields":[{"source-id":3,"field-id":1001,"name":"region_id","transform":"identity"}]}},
+                    {"action":"set-default-spec","spec-id":2},
+                    {"action":"add-snapshot","snapshot":{"sequence-number":1,"snapshot-id":101,"timestamp-ms":1700000000000,"schema-id":0,"spec-id":1}}
+                  ]
+                }
+                """;
+        String withSpecs = IcebergRestServer.applyCommitToTableResponseJson(base, seeded);
+
+        String removeUnused = """
+                {"updates":[{"action":"remove-partition-specs","spec-ids":[0]}]}
+                """;
+        String removed = IcebergRestServer.applyCommitToTableResponseJson(withSpecs, removeUnused);
+        JsonNode specs = MAPPER.readTree(removed).path("metadata").path("partition-specs");
+        assertEquals(2, specs.size());
+        assertEquals(1, specs.get(0).path("spec-id").asInt());
+        assertEquals(2, specs.get(1).path("spec-id").asInt());
+
+        String removeDefault = """
+                {"updates":[{"action":"remove-partition-specs","spec-ids":[2]}]}
+                """;
+        IllegalStateException ex1 = assertThrows(
+                IllegalStateException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(removed, removeDefault));
+        assertTrue(ex1.getMessage().contains("cannot remove default-spec-id"));
+
+        String removeInUse = """
+                {"updates":[{"action":"remove-partition-specs","spec-ids":[1]}]}
+                """;
+        IllegalStateException ex2 = assertThrows(
+                IllegalStateException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(removed, removeInUse));
+        assertTrue(ex2.getMessage().contains("cannot remove in-use spec-id"));
+    }
+
+    @Test
+    void removeSchemasEnforcesCurrentAndInUseProtections() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String seeded = """
+                {
+                  "updates": [
+                    {"action":"add-schema","schema":{"type":"struct","schema-id":1,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"},{"id":2,"name":"note","required":false,"type":"string"}]},"last-column-id":2},
+                    {"action":"add-schema","schema":{"type":"struct","schema-id":2,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"},{"id":2,"name":"note","required":false,"type":"string"},{"id":3,"name":"region","required":false,"type":"string"}]},"last-column-id":3},
+                    {"action":"set-current-schema","schema-id":2},
+                    {"action":"add-snapshot","snapshot":{"sequence-number":1,"snapshot-id":101,"timestamp-ms":1700000000000,"schema-id":1}}
+                  ]
+                }
+                """;
+        String withSchemas = IcebergRestServer.applyCommitToTableResponseJson(base, seeded);
+
+        String removeUnused = """
+                {"updates":[{"action":"remove-schemas","schema-ids":[0]}]}
+                """;
+        String removed = IcebergRestServer.applyCommitToTableResponseJson(withSchemas, removeUnused);
+        JsonNode schemas = MAPPER.readTree(removed).path("metadata").path("schemas");
+        assertEquals(2, schemas.size());
+        assertEquals(1, schemas.get(0).path("schema-id").asInt());
+        assertEquals(2, schemas.get(1).path("schema-id").asInt());
+
+        String removeCurrent = """
+                {"updates":[{"action":"remove-schemas","schema-ids":[2]}]}
+                """;
+        IllegalStateException ex1 = assertThrows(
+                IllegalStateException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(removed, removeCurrent));
+        assertTrue(ex1.getMessage().contains("cannot remove current-schema-id"));
+
+        String removeInUse = """
+                {"updates":[{"action":"remove-schemas","schema-ids":[1]}]}
+                """;
+        IllegalStateException ex2 = assertThrows(
+                IllegalStateException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(removed, removeInUse));
+        assertTrue(ex2.getMessage().contains("cannot remove in-use schema-id"));
+    }
+
+    @Test
     void addSortOrderAndSetDefaultSortOrderMutateSortMetadata() throws Exception {
         String createRequest = """
                 {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[

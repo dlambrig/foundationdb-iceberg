@@ -516,6 +516,73 @@ public class IcebergRestServer {
                     throw new IllegalArgumentException("set-default-spec references unknown spec-id: " + specId);
                 }
                 metadata.put("default-spec-id", specId);
+            } else if ("remove-partition-specs".equals(action)) {
+                JsonNode specIdsNode = updateNode.get("spec-ids");
+                if (specIdsNode == null || !specIdsNode.isArray()) {
+                    throw new IllegalArgumentException("remove-partition-specs requires spec-ids array");
+                }
+                List<Integer> removeSpecIds = new ArrayList<>();
+                for (JsonNode specIdNode : specIdsNode) {
+                    if (!specIdNode.canConvertToInt()) {
+                        throw new IllegalArgumentException("remove-partition-specs spec-ids must be integers");
+                    }
+                    removeSpecIds.add(specIdNode.asInt(Integer.MIN_VALUE));
+                }
+
+                ArrayNode partitionSpecs = ensureArray(metadata, "partition-specs");
+                List<Integer> existingSpecIds = collectIds(partitionSpecs, "spec-id");
+                for (int specId : removeSpecIds) {
+                    if (!existingSpecIds.contains(specId)) {
+                        throw new IllegalArgumentException("remove-partition-specs references unknown spec-id: " + specId);
+                    }
+                }
+
+                int defaultSpecId = metadata.path("default-spec-id").asInt(Integer.MIN_VALUE);
+                if (removeSpecIds.contains(defaultSpecId)) {
+                    throw new IllegalStateException("remove-partition-specs cannot remove default-spec-id: " + defaultSpecId);
+                }
+
+                List<Integer> referencedSpecIds = collectIds(snapshots, "spec-id");
+                for (int specId : removeSpecIds) {
+                    if (referencedSpecIds.contains(specId)) {
+                        throw new IllegalStateException("remove-partition-specs cannot remove in-use spec-id: " + specId);
+                    }
+                }
+
+                removeEntriesByIntId(partitionSpecs, "spec-id", removeSpecIds);
+            } else if ("remove-schemas".equals(action)) {
+                JsonNode schemaIdsNode = updateNode.get("schema-ids");
+                if (schemaIdsNode == null || !schemaIdsNode.isArray()) {
+                    throw new IllegalArgumentException("remove-schemas requires schema-ids array");
+                }
+                List<Integer> removeSchemaIds = new ArrayList<>();
+                for (JsonNode schemaIdNode : schemaIdsNode) {
+                    if (!schemaIdNode.canConvertToInt()) {
+                        throw new IllegalArgumentException("remove-schemas schema-ids must be integers");
+                    }
+                    removeSchemaIds.add(schemaIdNode.asInt(Integer.MIN_VALUE));
+                }
+
+                List<Integer> existingSchemaIds = collectIds(schemas, "schema-id");
+                for (int schemaId : removeSchemaIds) {
+                    if (!existingSchemaIds.contains(schemaId)) {
+                        throw new IllegalArgumentException("remove-schemas references unknown schema-id: " + schemaId);
+                    }
+                }
+
+                int currentSchemaId = metadata.path("current-schema-id").asInt(Integer.MIN_VALUE);
+                if (removeSchemaIds.contains(currentSchemaId)) {
+                    throw new IllegalStateException("remove-schemas cannot remove current-schema-id: " + currentSchemaId);
+                }
+
+                List<Integer> referencedSchemaIds = collectIds(snapshots, "schema-id");
+                for (int schemaId : removeSchemaIds) {
+                    if (referencedSchemaIds.contains(schemaId)) {
+                        throw new IllegalStateException("remove-schemas cannot remove in-use schema-id: " + schemaId);
+                    }
+                }
+
+                removeEntriesByIntId(schemas, "schema-id", removeSchemaIds);
             } else if ("add-sort-order".equals(action)) {
                 JsonNode sortOrderNode = updateNode.get("sort-order");
                 if (sortOrderNode == null || !sortOrderNode.isObject()) {
@@ -886,6 +953,35 @@ public class IcebergRestServer {
             }
         }
         return false;
+    }
+
+    private static List<Integer> collectIds(ArrayNode entries, String field) {
+        List<Integer> ids = new ArrayList<>();
+        for (JsonNode entry : entries) {
+            int id = entry.path(field).asInt(Integer.MIN_VALUE);
+            if (id != Integer.MIN_VALUE && !ids.contains(id)) {
+                ids.add(id);
+            }
+        }
+        return ids;
+    }
+
+    private static void removeEntriesByIntId(ArrayNode entries, String field, List<Integer> removeIds) {
+        if (removeIds.isEmpty()) {
+            return;
+        }
+        List<JsonNode> retained = new ArrayList<>();
+        for (JsonNode entry : entries) {
+            int id = entry.path(field).asInt(Integer.MIN_VALUE);
+            if (id != Integer.MIN_VALUE && removeIds.contains(id)) {
+                continue;
+            }
+            retained.add(entry.deepCopy());
+        }
+        entries.removeAll();
+        for (JsonNode retainedEntry : retained) {
+            entries.add(retainedEntry);
+        }
     }
 
     private static class ConfigHandler implements HttpHandler {
