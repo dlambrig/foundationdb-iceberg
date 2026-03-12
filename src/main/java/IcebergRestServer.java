@@ -343,6 +343,42 @@ public class IcebergRestServer {
                     throw new IllegalArgumentException("set-statistics requires statistics object");
                 }
                 statistics.add(stats.deepCopy());
+            } else if ("remove-statistics".equals(action)) {
+                JsonNode snapshotIdsNode = updateNode.get("snapshot-ids");
+                if (snapshotIdsNode == null || !snapshotIdsNode.isArray()) {
+                    throw new IllegalArgumentException("remove-statistics requires snapshot-ids array");
+                }
+                List<Long> removeSnapshotIds = new ArrayList<>();
+                for (JsonNode snapshotIdNode : snapshotIdsNode) {
+                    if (!snapshotIdNode.canConvertToLong()) {
+                        throw new IllegalArgumentException("remove-statistics snapshot-ids must be integers");
+                    }
+                    removeSnapshotIds.add(snapshotIdNode.asLong());
+                }
+                removeEntriesBySnapshotId(statistics, removeSnapshotIds);
+            } else if ("set-partition-statistics".equals(action)) {
+                JsonNode partitionStats = updateNode.get("partition-statistics");
+                if (partitionStats == null || !partitionStats.isObject()) {
+                    throw new IllegalArgumentException("set-partition-statistics requires partition-statistics object");
+                }
+
+                JsonNode snapshotIdNode = partitionStats.get("snapshot-id");
+                if (snapshotIdNode == null || !snapshotIdNode.canConvertToLong()) {
+                    throw new IllegalArgumentException("set-partition-statistics requires integer snapshot-id");
+                }
+                long snapshotId = snapshotIdNode.asLong();
+                JsonNode snapshot = findSnapshotById(snapshots, snapshotId);
+                if (snapshot == null) {
+                    throw new IllegalArgumentException("set-partition-statistics references unknown snapshot-id: " + snapshotId);
+                }
+                int snapshotSchemaId = snapshot.path("schema-id").asInt(Integer.MIN_VALUE);
+                if (snapshotSchemaId != Integer.MIN_VALUE && !schemaIdExists(schemas, snapshotSchemaId)) {
+                    throw new IllegalArgumentException("set-partition-statistics references snapshot with unknown schema-id: " + snapshotSchemaId);
+                }
+
+                ArrayNode partitionStatistics = ensureArray(metadata, "partition-statistics");
+                removeEntriesBySnapshotId(partitionStatistics, List.of(snapshotId));
+                partitionStatistics.add(partitionStats.deepCopy());
             } else if ("add-schema".equals(action)) {
                 JsonNode schema = updateNode.get("schema");
                 if (schema == null || !schema.isObject()) {
@@ -832,6 +868,24 @@ public class IcebergRestServer {
             }
         }
         return fieldIds;
+    }
+
+    private static JsonNode findSnapshotById(ArrayNode snapshots, long snapshotId) {
+        for (JsonNode snapshot : snapshots) {
+            if (snapshot.path("snapshot-id").asLong(Long.MIN_VALUE) == snapshotId) {
+                return snapshot;
+            }
+        }
+        return null;
+    }
+
+    private static boolean schemaIdExists(ArrayNode schemas, int schemaId) {
+        for (JsonNode schema : schemas) {
+            if (schema.path("schema-id").asInt(Integer.MIN_VALUE) == schemaId) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static class ConfigHandler implements HttpHandler {
