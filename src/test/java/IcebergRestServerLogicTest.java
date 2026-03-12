@@ -226,6 +226,48 @@ class IcebergRestServerLogicTest {
     }
 
     @Test
+    void addSpecAndSetDefaultSpecUpdateMutatePartitionMetadata() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[
+                {"id":1,"name":"order_id","required":false,"type":"long"},
+                {"id":2,"name":"order_date","required":false,"type":"date"}
+                ]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String addSpec = """
+                {"updates":[{"action":"add-spec","spec":{"spec-id":1,"fields":[{"source-id":2,"field-id":1000,"name":"order_day","transform":"day"}]}}]}
+                """;
+        String afterAdd = IcebergRestServer.applyCommitToTableResponseJson(base, addSpec);
+        JsonNode metadataAfterAdd = MAPPER.readTree(afterAdd).path("metadata");
+        assertEquals(2, metadataAfterAdd.path("partition-specs").size());
+        assertEquals(1000, metadataAfterAdd.path("last-partition-id").asInt());
+
+        String setDefault = """
+                {"updates":[{"action":"set-default-spec","spec-id":1}]}
+                """;
+        String afterDefault = IcebergRestServer.applyCommitToTableResponseJson(afterAdd, setDefault);
+        JsonNode metadataAfterDefault = MAPPER.readTree(afterDefault).path("metadata");
+        assertEquals(1, metadataAfterDefault.path("default-spec-id").asInt());
+
+        String badAddSpec = """
+                {"updates":[{"action":"add-spec","spec":{"spec-id":2,"fields":[{"source-id":2,"field-id":1001,"name":"x","transform":""}]}}]}
+                """;
+        IllegalArgumentException ex1 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(afterDefault, badAddSpec));
+        assertTrue(ex1.getMessage().contains("requires source-id, field-id, name, and transform"));
+
+        String badSetDefault = """
+                {"updates":[{"action":"set-default-spec","spec-id":999}]}
+                """;
+        IllegalArgumentException ex2 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(afterDefault, badSetDefault));
+        assertTrue(ex2.getMessage().contains("unknown spec-id"));
+    }
+
+    @Test
     void repeatedCommitWithSameRequirementConflicts() throws Exception {
         String createRequest = """
                 {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}

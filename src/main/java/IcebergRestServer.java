@@ -334,6 +334,74 @@ public class IcebergRestServer {
                     throw new IllegalArgumentException("set-location requires valid URI location");
                 }
                 metadata.put("location", location);
+            } else if ("add-spec".equals(action)) {
+                JsonNode specNode = updateNode.get("spec");
+                if (specNode == null || !specNode.isObject()) {
+                    throw new IllegalArgumentException("add-spec requires spec object");
+                }
+                int specId = specNode.path("spec-id").asInt(Integer.MIN_VALUE);
+                if (specId == Integer.MIN_VALUE) {
+                    throw new IllegalArgumentException("add-spec requires integer spec-id");
+                }
+
+                ArrayNode partitionSpecs = ensureArray(metadata, "partition-specs");
+                for (JsonNode existingSpec : partitionSpecs) {
+                    if (existingSpec.path("spec-id").asInt(Integer.MIN_VALUE) == specId) {
+                        throw new IllegalArgumentException("add-spec spec-id already exists: " + specId);
+                    }
+                }
+
+                JsonNode fieldsNode = specNode.get("fields");
+                if (fieldsNode == null || !fieldsNode.isArray()) {
+                    throw new IllegalArgumentException("add-spec requires fields array");
+                }
+                List<Integer> fieldIds = new ArrayList<>();
+                List<String> fieldNames = new ArrayList<>();
+                int maxPartitionFieldId = metadata.path("last-partition-id").asInt(999);
+                for (JsonNode field : fieldsNode) {
+                    if (!field.isObject()) {
+                        throw new IllegalArgumentException("add-spec fields must contain objects");
+                    }
+                    int sourceId = field.path("source-id").asInt(Integer.MIN_VALUE);
+                    int fieldId = field.path("field-id").asInt(Integer.MIN_VALUE);
+                    String name = field.path("name").asText("");
+                    String transform = field.path("transform").asText("");
+                    if (sourceId == Integer.MIN_VALUE || fieldId == Integer.MIN_VALUE
+                            || name.isEmpty() || transform.isEmpty()) {
+                        throw new IllegalArgumentException("add-spec field requires source-id, field-id, name, and transform");
+                    }
+                    if (fieldIds.contains(fieldId)) {
+                        throw new IllegalArgumentException("add-spec field-id must be unique within spec");
+                    }
+                    if (fieldNames.contains(name)) {
+                        throw new IllegalArgumentException("add-spec field name must be unique within spec");
+                    }
+                    fieldIds.add(fieldId);
+                    fieldNames.add(name);
+                    if (fieldId > maxPartitionFieldId) {
+                        maxPartitionFieldId = fieldId;
+                    }
+                }
+
+                partitionSpecs.add(specNode.deepCopy());
+                metadata.put("last-partition-id", maxPartitionFieldId);
+            } else if ("set-default-spec".equals(action)) {
+                int specId = updateNode.path("spec-id").asInt(Integer.MIN_VALUE);
+                if (specId == Integer.MIN_VALUE) {
+                    throw new IllegalArgumentException("set-default-spec requires integer spec-id");
+                }
+                ArrayNode partitionSpecs = ensureArray(metadata, "partition-specs");
+                boolean exists = false;
+                for (JsonNode existingSpec : partitionSpecs) {
+                    if (existingSpec.path("spec-id").asInt(Integer.MIN_VALUE) == specId) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    throw new IllegalArgumentException("set-default-spec references unknown spec-id: " + specId);
+                }
+                metadata.put("default-spec-id", specId);
             } else {
                 throw new IllegalArgumentException("Unsupported update action: " + action);
             }
