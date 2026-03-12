@@ -309,6 +309,109 @@ class IcebergRestServerLogicTest {
     }
 
     @Test
+    void removeSnapshotRefSupportsValidRemovalAndMainProtection() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[
+                {"id":1,"name":"order_id","required":false,"type":"long"}
+                ]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String seedRefs = """
+                {"updates":[
+                  {"action":"add-snapshot","snapshot":{"sequence-number":1,"snapshot-id":101,"timestamp-ms":1700000000000,"schema-id":0}},
+                  {"action":"set-snapshot-ref","ref-name":"main","snapshot-id":101,"type":"branch"},
+                  {"action":"set-snapshot-ref","ref-name":"dev","snapshot-id":101,"type":"branch"}
+                ]}
+                """;
+        String withRefs = IcebergRestServer.applyCommitToTableResponseJson(base, seedRefs);
+
+        String removeDev = """
+                {"updates":[{"action":"remove-snapshot-ref","ref-name":"dev"}]}
+                """;
+        String afterRemove = IcebergRestServer.applyCommitToTableResponseJson(withRefs, removeDev);
+        JsonNode refs = MAPPER.readTree(afterRemove).path("metadata").path("refs");
+        assertTrue(!refs.has("dev"));
+        assertTrue(refs.has("main"));
+
+        String removeMissing = """
+                {"updates":[{"action":"remove-snapshot-ref","ref-name":"missing"}]}
+                """;
+        IllegalArgumentException ex1 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(afterRemove, removeMissing));
+        assertTrue(ex1.getMessage().contains("unknown ref-name"));
+
+        String removeMain = """
+                {"updates":[{"action":"remove-snapshot-ref","ref-name":"main"}]}
+                """;
+        IllegalStateException ex2 = assertThrows(
+                IllegalStateException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(afterRemove, removeMain));
+        assertTrue(ex2.getMessage().contains("cannot remove required ref: main"));
+    }
+
+    @Test
+    void removeSnapshotsRespectsRefAndParentInvariants() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String withSnapshots = """
+                {"updates":[
+                  {"action":"add-snapshot","snapshot":{"sequence-number":1,"snapshot-id":101,"timestamp-ms":1700000000000,"schema-id":0}},
+                  {"action":"set-snapshot-ref","ref-name":"main","snapshot-id":101,"type":"branch"},
+                  {"action":"add-snapshot","snapshot":{"sequence-number":2,"snapshot-id":202,"parent-snapshot-id":101,"timestamp-ms":1700000001000,"schema-id":0}},
+                  {"action":"set-snapshot-ref","ref-name":"dev","snapshot-id":202,"type":"branch"}
+                ]}
+                """;
+        String seeded = IcebergRestServer.applyCommitToTableResponseJson(base, withSnapshots);
+
+        String removeProtected = """
+                {"updates":[{"action":"remove-snapshots","snapshot-ids":[202]}]}
+                """;
+        IllegalStateException ex1 = assertThrows(
+                IllegalStateException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(seeded, removeProtected));
+        assertTrue(ex1.getMessage().contains("cannot remove referenced snapshot-id"));
+
+        String removeDevRef = """
+                {"updates":[{"action":"remove-snapshot-ref","ref-name":"dev"}]}
+                """;
+        String afterRefRemoval = IcebergRestServer.applyCommitToTableResponseJson(seeded, removeDevRef);
+
+        String moveMainToChild = """
+                {"updates":[{"action":"set-snapshot-ref","ref-name":"main","snapshot-id":202,"type":"branch"}]}
+                """;
+        String afterMainMove = IcebergRestServer.applyCommitToTableResponseJson(afterRefRemoval, moveMainToChild);
+
+        String removeParentWithChild = """
+                {"updates":[{"action":"remove-snapshots","snapshot-ids":[101]}]}
+                """;
+        IllegalStateException ex2 = assertThrows(
+                IllegalStateException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(afterMainMove, removeParentWithChild));
+        assertTrue(ex2.getMessage().contains("dangling parent-snapshot-id"));
+
+        String removeChild = """
+                {"updates":[{"action":"remove-snapshots","snapshot-ids":[202]}]}
+                """;
+        String afterSnapshotRemoval = IcebergRestServer.applyCommitToTableResponseJson(afterRefRemoval, removeChild);
+        JsonNode metadata = MAPPER.readTree(afterSnapshotRemoval).path("metadata");
+        assertEquals(1, metadata.path("snapshots").size());
+        assertEquals(101L, metadata.path("snapshots").get(0).path("snapshot-id").asLong());
+
+        String unknownSnapshot = """
+                {"updates":[{"action":"remove-snapshots","snapshot-ids":[999]}]}
+                """;
+        IllegalArgumentException ex3 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(afterSnapshotRemoval, unknownSnapshot));
+        assertTrue(ex3.getMessage().contains("unknown snapshot-id"));
+    }
+
+    @Test
     void repeatedCommitWithSameRequirementConflicts() throws Exception {
         String createRequest = """
                 {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}

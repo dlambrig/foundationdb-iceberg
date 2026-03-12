@@ -229,6 +229,18 @@ class IcebergRestServerHttpTest {
                 "/v1/namespaces/analytics/tables/orders",
                 "{\"requirements\":[{\"type\":\"assert-default-sort-order-id\",\"default-sort-order-id\":\"abc\"}],\"updates\":[]}");
         assertEquals(400, assertDefaultSortOrderMalformed.statusCode);
+
+        HttpResponse removeMainRefConflict = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"updates\":[{\"action\":\"remove-snapshot-ref\",\"ref-name\":\"main\"}]}");
+        assertEquals(409, removeMainRefConflict.statusCode);
+
+        HttpResponse malformedRemoveSnapshots = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"updates\":[{\"action\":\"remove-snapshots\",\"snapshot-ids\":\"nope\"}]}");
+        assertEquals(400, malformedRemoveSnapshots.statusCode);
     }
 
     @Test
@@ -419,6 +431,34 @@ class IcebergRestServerHttpTest {
                 """;
         assertEquals(200, request("POST", "/v1/namespaces/analytics/tables/orders", addSortOrderCommit).statusCode);
 
+        String addDevRefCommit = """
+                {
+                  "updates":[
+                    {"action":"set-snapshot-ref","ref-name":"dev","snapshot-id":1001,"type":"branch"}
+                  ]
+                }
+                """;
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables/orders", addDevRefCommit).statusCode);
+
+        String removeDevRefCommit = """
+                {
+                  "updates":[
+                    {"action":"remove-snapshot-ref","ref-name":"dev"}
+                  ]
+                }
+                """;
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables/orders", removeDevRefCommit).statusCode);
+
+        String removeSnapshotsCommit = """
+                {
+                  "updates":[
+                    {"action":"remove-snapshots","snapshot-ids":[1001]}
+                  ]
+                }
+                """;
+        HttpResponse removeMainSnapshotConflict = request("POST", "/v1/namespaces/analytics/tables/orders", removeSnapshotsCommit);
+        assertEquals(409, removeMainSnapshotConflict.statusCode);
+
         HttpResponse get = request("GET", "/v1/namespaces/analytics/tables/orders", null);
         assertEquals(200, get.statusCode);
         JsonNode metadata = MAPPER.readTree(get.body).path("metadata");
@@ -440,6 +480,8 @@ class IcebergRestServerHttpTest {
         assertEquals(2, metadata.path("sort-orders").size());
         assertEquals("analytics-team", metadata.path("properties").path("owner").asText());
         assertTrue(metadata.path("properties").path("retention_days").isMissingNode());
+        assertTrue(metadata.path("refs").has("main"));
+        assertTrue(!metadata.path("refs").has("dev"));
     }
 
     private HttpResponse request(String method, String path, String body) throws Exception {
