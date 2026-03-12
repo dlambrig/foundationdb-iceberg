@@ -497,6 +497,43 @@ class IcebergRestServerLogicTest {
     }
 
     @Test
+    void upgradeFormatVersionIsMonotonicAndValidatesPayload() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+        assertEquals(2, MAPPER.readTree(base).path("metadata").path("format-version").asInt());
+
+        String upgrade = """
+                {"updates":[{"action":"upgrade-format-version","format-version":3}]}
+                """;
+        String upgraded = IcebergRestServer.applyCommitToTableResponseJson(base, upgrade);
+        assertEquals(3, MAPPER.readTree(upgraded).path("metadata").path("format-version").asInt());
+
+        String sameVersion = """
+                {"updates":[{"action":"upgrade-format-version","format-version":3}]}
+                """;
+        String same = IcebergRestServer.applyCommitToTableResponseJson(upgraded, sameVersion);
+        assertEquals(3, MAPPER.readTree(same).path("metadata").path("format-version").asInt());
+
+        String downgrade = """
+                {"updates":[{"action":"upgrade-format-version","format-version":2}]}
+                """;
+        IllegalStateException ex1 = assertThrows(
+                IllegalStateException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(upgraded, downgrade));
+        assertTrue(ex1.getMessage().contains("cannot downgrade format-version"));
+
+        String badPayload = """
+                {"updates":[{"action":"upgrade-format-version","format-version":"abc"}]}
+                """;
+        IllegalArgumentException ex2 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, badPayload));
+        assertTrue(ex2.getMessage().contains("requires integer format-version"));
+    }
+
+    @Test
     void removeSnapshotRefSupportsValidRemovalAndMainProtection() throws Exception {
         String createRequest = """
                 {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[
