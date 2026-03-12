@@ -259,6 +259,84 @@ public class IcebergRestServer {
                 if ("main".equals(refName)) {
                     metadata.put("current-snapshot-id", snapshotId);
                 }
+            } else if ("remove-snapshots".equals(action)) {
+                JsonNode snapshotIdsNode = updateNode.get("snapshot-ids");
+                if (snapshotIdsNode == null || !snapshotIdsNode.isArray()) {
+                    throw new IllegalArgumentException("remove-snapshots requires snapshot-ids array");
+                }
+
+                List<Long> removeSnapshotIds = new ArrayList<>();
+                for (JsonNode snapshotIdNode : snapshotIdsNode) {
+                    if (!snapshotIdNode.canConvertToLong()) {
+                        throw new IllegalArgumentException("remove-snapshots snapshot-ids must be integers");
+                    }
+                    removeSnapshotIds.add(snapshotIdNode.asLong());
+                }
+                if (removeSnapshotIds.isEmpty()) {
+                    continue;
+                }
+
+                // Prevent deleting snapshots that are still referenced by any branch/tag.
+                refs.fields().forEachRemaining(entry -> {
+                    JsonNode refSnapshotIdNode = entry.getValue().get("snapshot-id");
+                    if (refSnapshotIdNode != null && refSnapshotIdNode.canConvertToLong()) {
+                        long refSnapshotId = refSnapshotIdNode.asLong();
+                        if (removeSnapshotIds.contains(refSnapshotId)) {
+                            throw new IllegalStateException("remove-snapshots cannot remove referenced snapshot-id: " + refSnapshotId);
+                        }
+                    }
+                });
+
+                // Validate all requested snapshot IDs exist.
+                List<Long> existingSnapshotIds = new ArrayList<>();
+                for (JsonNode snapshot : snapshots) {
+                    long existingId = snapshot.path("snapshot-id").asLong(Long.MIN_VALUE);
+                    if (existingId != Long.MIN_VALUE) {
+                        existingSnapshotIds.add(existingId);
+                    }
+                }
+                for (Long snapshotId : removeSnapshotIds) {
+                    if (!existingSnapshotIds.contains(snapshotId)) {
+                        throw new IllegalArgumentException("remove-snapshots references unknown snapshot-id: " + snapshotId);
+                    }
+                }
+
+                // Prevent dangling parent links in retained snapshots.
+                for (JsonNode snapshot : snapshots) {
+                    long snapshotId = snapshot.path("snapshot-id").asLong(Long.MIN_VALUE);
+                    if (removeSnapshotIds.contains(snapshotId)) {
+                        continue;
+                    }
+                    JsonNode parentNode = snapshot.get("parent-snapshot-id");
+                    if (parentNode != null && parentNode.canConvertToLong()) {
+                        long parentId = parentNode.asLong(Long.MIN_VALUE);
+                        if (removeSnapshotIds.contains(parentId)) {
+                            throw new IllegalStateException("remove-snapshots would leave dangling parent-snapshot-id: " + parentId);
+                        }
+                    }
+                }
+
+                removeEntriesBySnapshotId(snapshots, removeSnapshotIds);
+                removeEntriesBySnapshotId(snapshotLog, removeSnapshotIds);
+                removeEntriesBySnapshotId(statistics, removeSnapshotIds);
+                removeEntriesBySnapshotId(ensureArray(metadata, "partition-statistics"), removeSnapshotIds);
+
+                long currentSnapshotId = metadata.path("current-snapshot-id").asLong(Long.MIN_VALUE);
+                if (removeSnapshotIds.contains(currentSnapshotId)) {
+                    metadata.put("current-snapshot-id", -1);
+                }
+            } else if ("remove-snapshot-ref".equals(action)) {
+                String refName = updateNode.path("ref-name").asText("");
+                if (refName.isEmpty()) {
+                    throw new IllegalArgumentException("remove-snapshot-ref requires ref-name");
+                }
+                if ("main".equals(refName)) {
+                    throw new IllegalStateException("remove-snapshot-ref cannot remove required ref: main");
+                }
+                if (!refs.has(refName)) {
+                    throw new IllegalArgumentException("remove-snapshot-ref references unknown ref-name: " + refName);
+                }
+                refs.remove(refName);
             } else if ("set-statistics".equals(action)) {
                 JsonNode stats = updateNode.get("statistics");
                 if (stats == null || !stats.isObject()) {
@@ -692,6 +770,27 @@ public class IcebergRestServer {
             return parent.putObject(fieldName);
         }
         return (ObjectNode) node;
+    }
+
+    private static void removeEntriesBySnapshotId(ArrayNode array, List<Long> snapshotIds) {
+        if (snapshotIds.isEmpty()) {
+            return;
+        }
+        List<JsonNode> retained = new ArrayList<>();
+        for (JsonNode entry : array) {
+            JsonNode snapshotIdNode = entry.get("snapshot-id");
+            if (snapshotIdNode != null && snapshotIdNode.canConvertToLong()) {
+                long snapshotId = snapshotIdNode.asLong(Long.MIN_VALUE);
+                if (snapshotIds.contains(snapshotId)) {
+                    continue;
+                }
+            }
+            retained.add(entry.deepCopy());
+        }
+        array.removeAll();
+        for (JsonNode entry : retained) {
+            array.add(entry);
+        }
     }
 
     private static List<Integer> collectCurrentSchemaFieldIds(ObjectNode metadata) {
