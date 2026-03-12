@@ -162,6 +162,12 @@ class IcebergRestServerHttpTest {
                 "/v1/namespaces/analytics/tables/orders",
                 "{\"updates\":[{\"action\":\"add-spec\",\"spec\":{\"spec-id\":1,\"fields\":\"nope\"}}]}");
         assertEquals(400, malformedAddSpec.statusCode);
+
+        HttpResponse malformedAddSortOrder = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"updates\":[{\"action\":\"add-sort-order\",\"sort-order\":{\"order-id\":1,\"fields\":[{\"source-id\":1,\"transform\":\"identity\",\"direction\":\"up\",\"null-order\":\"nulls-last\"}]}}]}");
+        assertEquals(400, malformedAddSortOrder.statusCode);
     }
 
     @Test
@@ -403,6 +409,16 @@ class IcebergRestServerHttpTest {
                 """;
         assertEquals(200, request("POST", "/v1/namespaces/analytics/tables/orders", addSpecCommit).statusCode);
 
+        String addSortOrderCommit = """
+                {
+                  "updates":[
+                    {"action":"add-sort-order","sort-order":{"order-id":1,"fields":[{"source-id":1,"transform":"identity","direction":"asc","null-order":"nulls-last"}]}},
+                    {"action":"set-default-sort-order","sort-order-id":1}
+                  ]
+                }
+                """;
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables/orders", addSortOrderCommit).statusCode);
+
         HttpResponse get = request("GET", "/v1/namespaces/analytics/tables/orders", null);
         assertEquals(200, get.statusCode);
         JsonNode metadata = MAPPER.readTree(get.body).path("metadata");
@@ -420,6 +436,8 @@ class IcebergRestServerHttpTest {
         assertEquals(1, metadata.path("default-spec-id").asInt());
         assertEquals(1000, metadata.path("last-partition-id").asInt());
         assertEquals(2, metadata.path("partition-specs").size());
+        assertEquals(1, metadata.path("default-sort-order-id").asInt());
+        assertEquals(2, metadata.path("sort-orders").size());
         assertEquals("analytics-team", metadata.path("properties").path("owner").asText());
         assertTrue(metadata.path("properties").path("retention_days").isMissingNode());
     }

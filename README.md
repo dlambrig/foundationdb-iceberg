@@ -50,6 +50,7 @@ docker cp fdb:/var/fdb/fdb.cluster ./fdb.cluster
   - table commit updates (including snapshot and schema-evolution paths used in current tests)
   - table metadata property updates via commit actions (`set-properties`, `remove-properties`)
   - partition spec updates via commit actions (`add-spec`, `set-default-spec`)
+  - sort order updates via commit actions (`add-sort-order`, `set-default-sort-order`)
   - `assert-create` requirement handling on commit path (conflicts on existing tables)
   - `assert-last-assigned-partition-id` requirement validation
   - `assert-default-spec-id` requirement validation

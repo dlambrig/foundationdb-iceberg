@@ -402,6 +402,67 @@ public class IcebergRestServer {
                     throw new IllegalArgumentException("set-default-spec references unknown spec-id: " + specId);
                 }
                 metadata.put("default-spec-id", specId);
+            } else if ("add-sort-order".equals(action)) {
+                JsonNode sortOrderNode = updateNode.get("sort-order");
+                if (sortOrderNode == null || !sortOrderNode.isObject()) {
+                    throw new IllegalArgumentException("add-sort-order requires sort-order object");
+                }
+                int orderId = sortOrderNode.path("order-id").asInt(Integer.MIN_VALUE);
+                if (orderId == Integer.MIN_VALUE) {
+                    throw new IllegalArgumentException("add-sort-order requires integer order-id");
+                }
+                ArrayNode sortOrders = ensureArray(metadata, "sort-orders");
+                for (JsonNode existingOrder : sortOrders) {
+                    if (existingOrder.path("order-id").asInt(Integer.MIN_VALUE) == orderId) {
+                        throw new IllegalArgumentException("add-sort-order order-id already exists: " + orderId);
+                    }
+                }
+
+                JsonNode fieldsNode = sortOrderNode.get("fields");
+                if (fieldsNode == null || !fieldsNode.isArray()) {
+                    throw new IllegalArgumentException("add-sort-order requires fields array");
+                }
+                List<Integer> validSourceIds = collectCurrentSchemaFieldIds(metadata);
+                for (JsonNode field : fieldsNode) {
+                    if (!field.isObject()) {
+                        throw new IllegalArgumentException("add-sort-order fields must contain objects");
+                    }
+                    int sourceId = field.path("source-id").asInt(Integer.MIN_VALUE);
+                    String transform = field.path("transform").asText("");
+                    String direction = field.path("direction").asText("");
+                    String nullOrder = field.path("null-order").asText("");
+                    if (sourceId == Integer.MIN_VALUE || transform.isEmpty() || direction.isEmpty() || nullOrder.isEmpty()) {
+                        throw new IllegalArgumentException("add-sort-order field requires source-id, transform, direction, and null-order");
+                    }
+                    if (!validSourceIds.contains(sourceId)) {
+                        throw new IllegalArgumentException("add-sort-order source-id does not exist in current schema: " + sourceId);
+                    }
+                    if (!"asc".equalsIgnoreCase(direction) && !"desc".equalsIgnoreCase(direction)) {
+                        throw new IllegalArgumentException("add-sort-order direction must be asc or desc");
+                    }
+                    if (!"nulls-first".equalsIgnoreCase(nullOrder) && !"nulls-last".equalsIgnoreCase(nullOrder)) {
+                        throw new IllegalArgumentException("add-sort-order null-order must be nulls-first or nulls-last");
+                    }
+                }
+
+                sortOrders.add(sortOrderNode.deepCopy());
+            } else if ("set-default-sort-order".equals(action)) {
+                int sortOrderId = updateNode.path("sort-order-id").asInt(Integer.MIN_VALUE);
+                if (sortOrderId == Integer.MIN_VALUE) {
+                    throw new IllegalArgumentException("set-default-sort-order requires integer sort-order-id");
+                }
+                ArrayNode sortOrders = ensureArray(metadata, "sort-orders");
+                boolean exists = false;
+                for (JsonNode existingOrder : sortOrders) {
+                    if (existingOrder.path("order-id").asInt(Integer.MIN_VALUE) == sortOrderId) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    throw new IllegalArgumentException("set-default-sort-order references unknown sort-order-id: " + sortOrderId);
+                }
+                metadata.put("default-sort-order-id", sortOrderId);
             } else {
                 throw new IllegalArgumentException("Unsupported update action: " + action);
             }
@@ -631,6 +692,47 @@ public class IcebergRestServer {
             return parent.putObject(fieldName);
         }
         return (ObjectNode) node;
+    }
+
+    private static List<Integer> collectCurrentSchemaFieldIds(ObjectNode metadata) {
+        List<Integer> fieldIds = new ArrayList<>();
+        int currentSchemaId = metadata.path("current-schema-id").asInt(Integer.MIN_VALUE);
+        JsonNode schemasNode = metadata.get("schemas");
+        if (schemasNode != null && schemasNode.isArray()) {
+            for (JsonNode schemaNode : schemasNode) {
+                if (!schemaNode.isObject()) {
+                    continue;
+                }
+                int schemaId = schemaNode.path("schema-id").asInt(Integer.MIN_VALUE);
+                if (schemaId != currentSchemaId) {
+                    continue;
+                }
+                JsonNode fieldsNode = schemaNode.get("fields");
+                if (fieldsNode != null && fieldsNode.isArray()) {
+                    for (JsonNode fieldNode : fieldsNode) {
+                        int id = fieldNode.path("id").asInt(Integer.MIN_VALUE);
+                        if (id != Integer.MIN_VALUE) {
+                            fieldIds.add(id);
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        if (fieldIds.isEmpty() && schemasNode != null && schemasNode.isArray()) {
+            for (JsonNode schemaNode : schemasNode) {
+                JsonNode fieldsNode = schemaNode.get("fields");
+                if (fieldsNode != null && fieldsNode.isArray()) {
+                    for (JsonNode fieldNode : fieldsNode) {
+                        int id = fieldNode.path("id").asInt(Integer.MIN_VALUE);
+                        if (id != Integer.MIN_VALUE && !fieldIds.contains(id)) {
+                            fieldIds.add(id);
+                        }
+                    }
+                }
+            }
+        }
+        return fieldIds;
     }
 
     private static class ConfigHandler implements HttpHandler {
