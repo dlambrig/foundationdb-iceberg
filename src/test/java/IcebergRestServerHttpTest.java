@@ -156,6 +156,12 @@ class IcebergRestServerHttpTest {
                 "/v1/namespaces/analytics/tables/orders",
                 "{\"updates\":[{\"action\":\"set-location\",\"location\":\"not-a-uri\"}]}");
         assertEquals(400, malformedSetLocation.statusCode);
+
+        HttpResponse malformedAddSpec = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"updates\":[{\"action\":\"add-spec\",\"spec\":{\"spec-id\":1,\"fields\":\"nope\"}}]}");
+        assertEquals(400, malformedAddSpec.statusCode);
     }
 
     @Test
@@ -387,6 +393,16 @@ class IcebergRestServerHttpTest {
                 """;
         assertEquals(200, request("POST", "/v1/namespaces/analytics/tables/orders", setLocationCommit).statusCode);
 
+        String addSpecCommit = """
+                {
+                  "updates":[
+                    {"action":"add-spec","spec":{"spec-id":1,"fields":[{"source-id":1,"field-id":1000,"name":"id_bucket","transform":"bucket[16]"}]}},
+                    {"action":"set-default-spec","spec-id":1}
+                  ]
+                }
+                """;
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables/orders", addSpecCommit).statusCode);
+
         HttpResponse get = request("GET", "/v1/namespaces/analytics/tables/orders", null);
         assertEquals(200, get.statusCode);
         JsonNode metadata = MAPPER.readTree(get.body).path("metadata");
@@ -401,6 +417,9 @@ class IcebergRestServerHttpTest {
         assertEquals(2, metadata.path("current-schema-id").asInt());
         assertEquals(2, metadata.path("last-column-id").asInt());
         assertEquals("local:///iceberg_warehouse_custom/analytics/orders", metadata.path("location").asText());
+        assertEquals(1, metadata.path("default-spec-id").asInt());
+        assertEquals(1000, metadata.path("last-partition-id").asInt());
+        assertEquals(2, metadata.path("partition-specs").size());
         assertEquals("analytics-team", metadata.path("properties").path("owner").asText());
         assertTrue(metadata.path("properties").path("retention_days").isMissingNode());
     }
