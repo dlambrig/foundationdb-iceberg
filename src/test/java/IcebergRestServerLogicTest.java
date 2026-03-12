@@ -268,6 +268,47 @@ class IcebergRestServerLogicTest {
     }
 
     @Test
+    void addSortOrderAndSetDefaultSortOrderMutateSortMetadata() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[
+                {"id":1,"name":"order_id","required":false,"type":"long"},
+                {"id":2,"name":"order_date","required":false,"type":"date"}
+                ]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String addSortOrder = """
+                {"updates":[{"action":"add-sort-order","sort-order":{"order-id":1,"fields":[{"source-id":1,"transform":"identity","direction":"asc","null-order":"nulls-last"}]}}]}
+                """;
+        String afterAdd = IcebergRestServer.applyCommitToTableResponseJson(base, addSortOrder);
+        JsonNode metadataAfterAdd = MAPPER.readTree(afterAdd).path("metadata");
+        assertEquals(2, metadataAfterAdd.path("sort-orders").size());
+
+        String setDefault = """
+                {"updates":[{"action":"set-default-sort-order","sort-order-id":1}]}
+                """;
+        String afterDefault = IcebergRestServer.applyCommitToTableResponseJson(afterAdd, setDefault);
+        JsonNode metadataAfterDefault = MAPPER.readTree(afterDefault).path("metadata");
+        assertEquals(1, metadataAfterDefault.path("default-sort-order-id").asInt());
+
+        String badDirection = """
+                {"updates":[{"action":"add-sort-order","sort-order":{"order-id":2,"fields":[{"source-id":1,"transform":"identity","direction":"up","null-order":"nulls-last"}]}}]}
+                """;
+        IllegalArgumentException ex1 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(afterDefault, badDirection));
+        assertTrue(ex1.getMessage().contains("direction must be asc or desc"));
+
+        String badSourceId = """
+                {"updates":[{"action":"add-sort-order","sort-order":{"order-id":2,"fields":[{"source-id":999,"transform":"identity","direction":"asc","null-order":"nulls-last"}]}}]}
+                """;
+        IllegalArgumentException ex2 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(afterDefault, badSourceId));
+        assertTrue(ex2.getMessage().contains("source-id does not exist"));
+    }
+
+    @Test
     void repeatedCommitWithSameRequirementConflicts() throws Exception {
         String createRequest = """
                 {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
