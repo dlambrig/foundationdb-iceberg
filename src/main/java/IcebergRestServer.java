@@ -379,6 +379,20 @@ public class IcebergRestServer {
                 ArrayNode partitionStatistics = ensureArray(metadata, "partition-statistics");
                 removeEntriesBySnapshotId(partitionStatistics, List.of(snapshotId));
                 partitionStatistics.add(partitionStats.deepCopy());
+            } else if ("remove-partition-statistics".equals(action)) {
+                JsonNode snapshotIdsNode = updateNode.get("snapshot-ids");
+                if (snapshotIdsNode == null || !snapshotIdsNode.isArray()) {
+                    throw new IllegalArgumentException("remove-partition-statistics requires snapshot-ids array");
+                }
+                List<Long> removeSnapshotIds = new ArrayList<>();
+                for (JsonNode snapshotIdNode : snapshotIdsNode) {
+                    if (!snapshotIdNode.canConvertToLong()) {
+                        throw new IllegalArgumentException("remove-partition-statistics snapshot-ids must be integers");
+                    }
+                    removeSnapshotIds.add(snapshotIdNode.asLong());
+                }
+                ArrayNode partitionStatistics = ensureArray(metadata, "partition-statistics");
+                removeEntriesBySnapshotId(partitionStatistics, removeSnapshotIds);
             } else if ("add-schema".equals(action)) {
                 JsonNode schema = updateNode.get("schema");
                 if (schema == null || !schema.isObject()) {
