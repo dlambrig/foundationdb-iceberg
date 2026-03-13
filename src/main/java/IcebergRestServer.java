@@ -735,11 +735,7 @@ public class IcebergRestServer {
             if ("assert-create".equals(type)) {
                 throw new IllegalStateException("assert-create failed");
             } else if ("assert-table-uuid".equals(type)) {
-                JsonNode expectedNode = requirement.get("uuid");
-                if (expectedNode == null || !expectedNode.isTextual() || expectedNode.asText("").isEmpty()) {
-                    throw new IllegalArgumentException("assert-table-uuid requires non-empty uuid");
-                }
-                String expected = expectedNode.asText();
+                String expected = requireUuidRequirement(requirement, "uuid", "assert-table-uuid");
                 String actual = metadata.path("table-uuid").asText("");
                 if (!expected.equals(actual)) {
                     throw new IllegalStateException("assert-table-uuid failed");
@@ -754,7 +750,7 @@ public class IcebergRestServer {
                 if (expectedNode == null) {
                     throw new IllegalArgumentException("assert-ref-snapshot-id requires snapshot-id");
                 }
-                if (!expectedNode.isNull() && !expectedNode.canConvertToLong()) {
+                if (!expectedNode.isNull() && !expectedNode.isIntegralNumber()) {
                     throw new IllegalArgumentException("assert-ref-snapshot-id snapshot-id must be an integer or null");
                 }
                 JsonNode actualNode = metadata.path("refs").path(ref).get("snapshot-id");
@@ -765,66 +761,37 @@ public class IcebergRestServer {
                     throw new IllegalStateException("assert-ref-snapshot-id failed");
                 }
             } else if ("assert-current-schema-id".equals(type)) {
-                JsonNode expectedNode = requirement.get("current-schema-id");
-                if (expectedNode == null || !expectedNode.canConvertToInt()) {
-                    throw new IllegalArgumentException("assert-current-schema-id requires integer current-schema-id");
-                }
-                int expected = expectedNode.asInt(Integer.MIN_VALUE);
+                int expected = requireIntRequirement(requirement, "current-schema-id", "assert-current-schema-id");
                 int actual = metadata.path("current-schema-id").asInt(Integer.MIN_VALUE);
                 if (expected == Integer.MIN_VALUE || expected != actual) {
                     throw new IllegalStateException("assert-current-schema-id failed");
                 }
             } else if ("assert-last-assigned-field-id".equals(type)) {
-                JsonNode expectedNode = requirement.get("last-assigned-field-id");
-                if (expectedNode == null || !expectedNode.canConvertToLong()) {
-                    throw new IllegalArgumentException("assert-last-assigned-field-id requires integer last-assigned-field-id");
-                }
-                long expected = expectedNode.asLong(Long.MIN_VALUE);
+                long expected = requireLongRequirement(requirement, "last-assigned-field-id", "assert-last-assigned-field-id");
                 long actual = metadata.path("last-column-id").asLong(Long.MIN_VALUE);
                 if (expected == Long.MIN_VALUE || expected != actual) {
                     throw new IllegalStateException("assert-last-assigned-field-id failed");
                 }
             } else if ("assert-last-assigned-partition-id".equals(type)) {
-                JsonNode expectedNode = requirement.get("last-assigned-partition-id");
-                if (expectedNode == null || !expectedNode.canConvertToLong()) {
-                    throw new IllegalArgumentException("assert-last-assigned-partition-id requires integer last-assigned-partition-id");
-                }
-                long expected = expectedNode.asLong(Long.MIN_VALUE);
+                long expected = requireLongRequirement(requirement, "last-assigned-partition-id", "assert-last-assigned-partition-id");
                 long actual = metadata.path("last-partition-id").asLong(Long.MIN_VALUE);
                 if (expected == Long.MIN_VALUE || expected != actual) {
                     throw new IllegalStateException("assert-last-assigned-partition-id failed");
                 }
             } else if ("assert-default-spec-id".equals(type)) {
-                JsonNode expectedNode = requirement.get("default-spec-id");
-                if (expectedNode == null || !expectedNode.canConvertToLong()) {
-                    throw new IllegalArgumentException("assert-default-spec-id requires integer default-spec-id");
-                }
-                long expected = expectedNode.asLong(Long.MIN_VALUE);
+                long expected = requireLongRequirement(requirement, "default-spec-id", "assert-default-spec-id");
                 long actual = metadata.path("default-spec-id").asLong(Long.MIN_VALUE);
                 if (expected == Long.MIN_VALUE || expected != actual) {
                     throw new IllegalStateException("assert-default-spec-id failed");
                 }
             } else if ("assert-default-sort-order-id".equals(type)) {
-                JsonNode expectedNode = requirement.get("default-sort-order-id");
-                if (expectedNode == null || !expectedNode.canConvertToLong()) {
-                    throw new IllegalArgumentException("assert-default-sort-order-id requires integer default-sort-order-id");
-                }
-                long expected = expectedNode.asLong(Long.MIN_VALUE);
+                long expected = requireLongRequirement(requirement, "default-sort-order-id", "assert-default-sort-order-id");
                 long actual = metadata.path("default-sort-order-id").asLong(Long.MIN_VALUE);
                 if (expected == Long.MIN_VALUE || expected != actual) {
                     throw new IllegalStateException("assert-default-sort-order-id failed");
                 }
             } else if ("assert-view-uuid".equals(type)) {
-                JsonNode expectedNode = requirement.get("uuid");
-                if (expectedNode == null || !expectedNode.isTextual() || expectedNode.asText("").isEmpty()) {
-                    throw new IllegalArgumentException("assert-view-uuid requires non-empty uuid");
-                }
-                String expected = expectedNode.asText();
-                try {
-                    UUID.fromString(expected);
-                } catch (IllegalArgumentException e) {
-                    throw new IllegalArgumentException("assert-view-uuid requires valid UUID");
-                }
+                String expected = requireUuidRequirement(requirement, "uuid", "assert-view-uuid");
                 String actual = metadata.path("view-uuid").asText("");
                 if (!expected.equals(actual)) {
                     throw new IllegalStateException("assert-view-uuid failed");
@@ -833,6 +800,36 @@ public class IcebergRestServer {
                 throw new IllegalArgumentException("Unsupported requirement type: " + type);
             }
         }
+    }
+
+    private static int requireIntRequirement(JsonNode requirement, String field, String requirementType) {
+        JsonNode node = requirement.get(field);
+        if (node == null || !node.isIntegralNumber() || !node.canConvertToInt()) {
+            throw new IllegalArgumentException(requirementType + " requires integer " + field);
+        }
+        return node.asInt(Integer.MIN_VALUE);
+    }
+
+    private static long requireLongRequirement(JsonNode requirement, String field, String requirementType) {
+        JsonNode node = requirement.get(field);
+        if (node == null || !node.isIntegralNumber() || !node.canConvertToLong()) {
+            throw new IllegalArgumentException(requirementType + " requires integer " + field);
+        }
+        return node.asLong(Long.MIN_VALUE);
+    }
+
+    private static String requireUuidRequirement(JsonNode requirement, String field, String requirementType) {
+        JsonNode node = requirement.get(field);
+        if (node == null || !node.isTextual() || node.asText("").isEmpty()) {
+            throw new IllegalArgumentException(requirementType + " requires non-empty " + field);
+        }
+        String value = node.asText();
+        try {
+            UUID.fromString(value);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(requirementType + " requires valid UUID");
+        }
+        return value;
     }
 
     static void persistMetadataFile(String loadTableResponseJson) {

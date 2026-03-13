@@ -932,6 +932,46 @@ class IcebergRestServerLogicTest {
     }
 
     @Test
+    void requirementValidationIsStrictForTypesAndConflictClassificationRemainsStable() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String badCurrentSchemaType = """
+                {"requirements":[{"type":"assert-current-schema-id","current-schema-id":"0"}],"updates":[]}
+                """;
+        IllegalArgumentException ex1 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, badCurrentSchemaType));
+        assertTrue(ex1.getMessage().contains("requires integer current-schema-id"));
+
+        String badDefaultSpecType = """
+                {"requirements":[{"type":"assert-default-spec-id","default-spec-id":1.25}],"updates":[]}
+                """;
+        IllegalArgumentException ex2 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, badDefaultSpecType));
+        assertTrue(ex2.getMessage().contains("requires integer default-spec-id"));
+
+        String badTableUuidFormat = """
+                {"requirements":[{"type":"assert-table-uuid","uuid":"not-a-uuid"}],"updates":[]}
+                """;
+        IllegalArgumentException ex3 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, badTableUuidFormat));
+        assertTrue(ex3.getMessage().contains("requires valid UUID"));
+
+        String conflictCurrentSchema = """
+                {"requirements":[{"type":"assert-current-schema-id","current-schema-id":1}],"updates":[]}
+                """;
+        IllegalStateException ex4 = assertThrows(
+                IllegalStateException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, conflictCurrentSchema));
+        assertTrue(ex4.getMessage().contains("assert-current-schema-id failed"));
+    }
+
+    @Test
     void inMemoryAtomicCommitAllowsOnlyOneWriterForSameRequirement() throws Exception {
         InMemoryTableStore store = new InMemoryTableStore();
         String createRequest = """
