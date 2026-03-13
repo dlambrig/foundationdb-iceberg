@@ -890,6 +890,48 @@ class IcebergRestServerLogicTest {
     }
 
     @Test
+    void assertViewUuidSupportsSuccessConflictAndBadPayload() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+        JsonNode baseRoot = MAPPER.readTree(base);
+        ((com.fasterxml.jackson.databind.node.ObjectNode) baseRoot.path("metadata"))
+                .put("view-uuid", "11111111-1111-1111-1111-111111111111");
+        String withViewUuid = MAPPER.writeValueAsString(baseRoot);
+
+        String success = """
+                {"requirements":[{"type":"assert-view-uuid","uuid":"11111111-1111-1111-1111-111111111111"}],"updates":[]}
+                """;
+        String unchanged = IcebergRestServer.applyCommitToTableResponseJson(withViewUuid, success);
+        assertEquals("11111111-1111-1111-1111-111111111111", MAPPER.readTree(unchanged).path("metadata").path("view-uuid").asText());
+
+        String conflict = """
+                {"requirements":[{"type":"assert-view-uuid","uuid":"22222222-2222-2222-2222-222222222222"}],"updates":[]}
+                """;
+        IllegalStateException ex1 = assertThrows(
+                IllegalStateException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(withViewUuid, conflict));
+        assertTrue(ex1.getMessage().contains("assert-view-uuid failed"));
+
+        String malformedMissing = """
+                {"requirements":[{"type":"assert-view-uuid"}],"updates":[]}
+                """;
+        IllegalArgumentException ex2 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(withViewUuid, malformedMissing));
+        assertTrue(ex2.getMessage().contains("requires non-empty uuid"));
+
+        String malformedBadUuid = """
+                {"requirements":[{"type":"assert-view-uuid","uuid":"not-a-uuid"}],"updates":[]}
+                """;
+        IllegalArgumentException ex3 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(withViewUuid, malformedBadUuid));
+        assertTrue(ex3.getMessage().contains("requires valid UUID"));
+    }
+
+    @Test
     void inMemoryAtomicCommitAllowsOnlyOneWriterForSameRequirement() throws Exception {
         InMemoryTableStore store = new InMemoryTableStore();
         String createRequest = """
