@@ -7,6 +7,8 @@ This harness starts:
 - direct REST checks via `curl` (for commit requirement behavior like `assert-create`)
 - metadata pointer transition checks (`metadata-location` advancing from `00000` to `00001`/`00002`)
 
+For a faster compatibility subset, use `trino_smoke.sh` (minimal schema/table/insert/read/drop flow).
+
 ## Run
 
 ```bash
@@ -19,6 +21,36 @@ Run against FoundationDB-backed server mode:
 ```bash
 cd /Users/dlambrig/apple/foundationdb-iceberg
 ./integration/run_integration.sh --fdb
+```
+
+## Run Fast Trino Smoke
+
+```bash
+cd /Users/dlambrig/apple/foundationdb-iceberg
+./integration/trino_smoke.sh
+```
+
+By default this starts both:
+- `IcebergRestServer` on `:8181`
+- Trino on `:8080` (unless already running)
+
+FDB-backed mode:
+
+```bash
+cd /Users/dlambrig/apple/foundationdb-iceberg
+./integration/trino_smoke.sh --fdb
+```
+
+Use already-running server on `:8181`:
+
+```bash
+./integration/trino_smoke.sh --no-start-server
+```
+
+Use already-running Trino on `:8080`:
+
+```bash
+./integration/trino_smoke.sh --no-start-trino
 ```
 
 ## Prerequisites
@@ -34,6 +66,8 @@ cd /Users/dlambrig/apple/foundationdb-iceberg
   - `fdb.cluster` exists at repo root
   - FoundationDB client library exists (default expected path: `/usr/local/lib/libfdb_c.dylib`)
   - If needed, set `FDB_LIBRARY_PATH_FDB_C` to your `libfdb_c` path
+
+Note: `trino_smoke.sh` can auto-start Trino if launcher/config are available; otherwise use `--no-start-trino` with an existing Trino instance.
 
 ## Environment Overrides
 
