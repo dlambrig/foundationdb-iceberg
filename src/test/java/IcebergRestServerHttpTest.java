@@ -220,6 +220,18 @@ class IcebergRestServerHttpTest {
                 "/v1/namespaces/analytics/tables/orders",
                 "{\"updates\":[{\"action\":\"add-sort-order\",\"sort-order\":{\"order-id\":1,\"fields\":[{\"source-id\":1,\"transform\":\"identity\",\"direction\":\"up\",\"null-order\":\"nulls-last\"}]}}]}");
         assertEquals(400, malformedAddSortOrder.statusCode);
+
+        HttpResponse malformedAddEncryptionKey = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"updates\":[{\"action\":\"add-encryption-key\",\"encryption-key\":{\"wrapped-key\":\"abc\"}}]}");
+        assertEquals(400, malformedAddEncryptionKey.statusCode);
+
+        HttpResponse malformedRemoveEncryptionKey = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"updates\":[{\"action\":\"remove-encryption-key\",\"key-ids\":\"bad\"}]}");
+        assertEquals(400, malformedRemoveEncryptionKey.statusCode);
     }
 
     @Test

@@ -183,6 +183,7 @@ public class IcebergRestServer {
         metadata.putArray("snapshots");
         metadata.putArray("statistics");
         metadata.putArray("partition-statistics");
+        metadata.putArray("encryption-keys");
         metadata.putArray("snapshot-log");
         metadata.putArray("metadata-log");
 
@@ -301,6 +302,7 @@ public class IcebergRestServer {
         ArrayNode snapshotLog = ensureArray(metadata, "snapshot-log");
         ArrayNode metadataLog = ensureArray(metadata, "metadata-log");
         ArrayNode schemas = ensureArray(metadata, "schemas");
+        ArrayNode encryptionKeys = ensureArray(metadata, "encryption-keys");
 
         long maxSequence = metadata.path("last-sequence-number").asLong(0);
         JsonNode updatesNode = commitRoot.get("updates");
@@ -537,6 +539,54 @@ public class IcebergRestServer {
                     }
                     properties.remove(removal.asText());
                 }
+            } else if ("add-encryption-key".equals(action)) {
+                JsonNode encryptionKeyNode = updateNode.get("encryption-key");
+                if (encryptionKeyNode == null || !encryptionKeyNode.isObject()) {
+                    throw new IllegalArgumentException("add-encryption-key requires encryption-key object");
+                }
+                JsonNode keyIdNode = encryptionKeyNode.get("key-id");
+                if (keyIdNode == null || !keyIdNode.canConvertToLong()) {
+                    throw new IllegalArgumentException("add-encryption-key requires integer key-id");
+                }
+                long keyId = keyIdNode.asLong(Long.MIN_VALUE);
+                if (keyId == Long.MIN_VALUE) {
+                    throw new IllegalArgumentException("add-encryption-key requires integer key-id");
+                }
+
+                for (JsonNode existingKey : encryptionKeys) {
+                    JsonNode existingKeyIdNode = existingKey.get("key-id");
+                    if (existingKeyIdNode != null && existingKeyIdNode.canConvertToLong()
+                            && existingKeyIdNode.asLong(Long.MIN_VALUE) == keyId) {
+                        throw new IllegalArgumentException("add-encryption-key key-id already exists: " + keyId);
+                    }
+                }
+                encryptionKeys.add(encryptionKeyNode.deepCopy());
+            } else if ("remove-encryption-key".equals(action)) {
+                List<Long> removeKeyIds = new ArrayList<>();
+                JsonNode keyIdNode = updateNode.get("key-id");
+                JsonNode keyIdsNode = updateNode.get("key-ids");
+                if (keyIdNode == null && keyIdsNode == null) {
+                    throw new IllegalArgumentException("remove-encryption-key requires key-id or key-ids");
+                }
+                if (keyIdNode != null) {
+                    if (!keyIdNode.canConvertToLong()) {
+                        throw new IllegalArgumentException("remove-encryption-key key-id must be an integer");
+                    }
+                    removeKeyIds.add(keyIdNode.asLong(Long.MIN_VALUE));
+                }
+                if (keyIdsNode != null) {
+                    if (!keyIdsNode.isArray()) {
+                        throw new IllegalArgumentException("remove-encryption-key key-ids must be an array");
+                    }
+                    for (JsonNode keyNode : keyIdsNode) {
+                        if (!keyNode.canConvertToLong()) {
+                            throw new IllegalArgumentException("remove-encryption-key key-ids must be integers");
+                        }
+                        removeKeyIds.add(keyNode.asLong(Long.MIN_VALUE));
+                    }
+                }
+
+                removeEntriesByLongId(encryptionKeys, "key-id", removeKeyIds);
             } else if ("set-location".equals(action)) {
                 JsonNode locationNode = updateNode.get("location");
                 if (locationNode == null || !locationNode.isTextual() || locationNode.asText("").isEmpty()) {
@@ -1290,6 +1340,24 @@ public class IcebergRestServer {
         for (JsonNode entry : entries) {
             int id = entry.path(field).asInt(Integer.MIN_VALUE);
             if (id != Integer.MIN_VALUE && removeIds.contains(id)) {
+                continue;
+            }
+            retained.add(entry.deepCopy());
+        }
+        entries.removeAll();
+        for (JsonNode retainedEntry : retained) {
+            entries.add(retainedEntry);
+        }
+    }
+
+    private static void removeEntriesByLongId(ArrayNode entries, String field, List<Long> removeIds) {
+        if (removeIds.isEmpty()) {
+            return;
+        }
+        List<JsonNode> retained = new ArrayList<>();
+        for (JsonNode entry : entries) {
+            long id = entry.path(field).asLong(Long.MIN_VALUE);
+            if (id != Long.MIN_VALUE && removeIds.contains(id)) {
                 continue;
             }
             retained.add(entry.deepCopy());
