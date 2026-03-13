@@ -814,6 +814,21 @@ public class IcebergRestServer {
                 if (expected == Long.MIN_VALUE || expected != actual) {
                     throw new IllegalStateException("assert-default-sort-order-id failed");
                 }
+            } else if ("assert-view-uuid".equals(type)) {
+                JsonNode expectedNode = requirement.get("uuid");
+                if (expectedNode == null || !expectedNode.isTextual() || expectedNode.asText("").isEmpty()) {
+                    throw new IllegalArgumentException("assert-view-uuid requires non-empty uuid");
+                }
+                String expected = expectedNode.asText();
+                try {
+                    UUID.fromString(expected);
+                } catch (IllegalArgumentException e) {
+                    throw new IllegalArgumentException("assert-view-uuid requires valid UUID");
+                }
+                String actual = metadata.path("view-uuid").asText("");
+                if (!expected.equals(actual)) {
+                    throw new IllegalStateException("assert-view-uuid failed");
+                }
             } else {
                 throw new IllegalArgumentException("Unsupported requirement type: " + type);
             }
