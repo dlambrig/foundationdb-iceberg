@@ -122,6 +122,58 @@ class IcebergRestServerHttpTest {
     }
 
     @Test
+    void createListCommitAndDeleteViewWorks() throws Exception {
+        request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
+
+        String createViewBody = """
+                {
+                  "name":"orders_view",
+                  "location":"local:///iceberg_warehouse/analytics/views/orders_view",
+                  "view-version":{"version-id":1,"timestamp-ms":1700000000000,"schema-id":0},
+                  "schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":true,"type":"long"}]},
+                  "properties":{"owner":"analytics-team"}
+                }
+                """;
+        HttpResponse create = request("POST", "/v1/namespaces/analytics/views", createViewBody);
+        assertEquals(200, create.statusCode);
+        JsonNode createRoot = MAPPER.readTree(create.body);
+        assertTrue(createRoot.path("metadata").has("view-uuid"));
+        assertEquals(1, createRoot.path("metadata").path("current-version-id").asInt());
+
+        HttpResponse list = request("GET", "/v1/namespaces/analytics/views", null);
+        assertEquals(200, list.statusCode);
+        JsonNode identifiers = MAPPER.readTree(list.body).path("identifiers");
+        assertEquals(1, identifiers.size());
+        assertEquals("orders_view", identifiers.get(0).path("name").asText());
+
+        String commitBody = """
+                {
+                  "requirements":[{"type":"assert-view-uuid","uuid":"%s"}],
+                  "updates":[
+                    {"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000}},
+                    {"action":"set-current-view-version","version-id":2},
+                    {"action":"set-properties","updates":{"owner":"analytics-team"}}
+                  ]
+                }
+                """.formatted(createRoot.path("metadata").path("view-uuid").asText());
+        HttpResponse commit = request("POST", "/v1/namespaces/analytics/views/orders_view", commitBody);
+        assertEquals(200, commit.statusCode);
+        JsonNode committedMetadata = MAPPER.readTree(commit.body).path("metadata");
+        assertEquals(2, committedMetadata.path("versions").size());
+        assertEquals(2, committedMetadata.path("current-version-id").asInt());
+        assertEquals("analytics-team", committedMetadata.path("properties").path("owner").asText());
+
+        HttpResponse get = request("GET", "/v1/namespaces/analytics/views/orders_view", null);
+        assertEquals(200, get.statusCode);
+        JsonNode getMetadata = MAPPER.readTree(get.body).path("metadata");
+        assertEquals(2, getMetadata.path("versions").size());
+
+        HttpResponse deleteView = request("DELETE", "/v1/namespaces/analytics/views/orders_view", null);
+        assertEquals(204, deleteView.statusCode);
+        assertEquals(404, request("GET", "/v1/namespaces/analytics/views/orders_view", null).statusCode);
+    }
+
+    @Test
     void commitRejectsUnknownActionAndMissingFields() throws Exception {
         request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
         String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
@@ -332,6 +384,25 @@ class IcebergRestServerHttpTest {
 
         HttpResponse deleteNamespace = request("DELETE", "/v1/namespaces/analytics", null);
         assertEquals(204, deleteNamespace.statusCode);
+    }
+
+    @Test
+    void deleteNamespaceConflictsWhenViewsExist() throws Exception {
+        assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}").statusCode);
+        String createViewBody = """
+                {
+                  "name":"v1",
+                  "view-version":{"version-id":1,"timestamp-ms":1700000000000,"schema-id":0},
+                  "schema":{"type":"struct","schema-id":0,"fields":[]}
+                }
+                """;
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/views", createViewBody).statusCode);
+
+        HttpResponse namespaceDeleteConflict = request("DELETE", "/v1/namespaces/analytics", null);
+        assertEquals(409, namespaceDeleteConflict.statusCode);
+
+        assertEquals(204, request("DELETE", "/v1/namespaces/analytics/views/v1", null).statusCode);
+        assertEquals(204, request("DELETE", "/v1/namespaces/analytics", null).statusCode);
     }
 
     @Test

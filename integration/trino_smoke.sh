@@ -249,6 +249,7 @@ wait_for_trino
 
 SCHEMA="smoke_${RUN_ID}"
 TABLE="orders"
+VIEW="orders_v"
 
 echo "==> Running Trino smoke checks"
 run_and_expect "Create schema" "CREATE SCHEMA IF NOT EXISTS iceberg.${SCHEMA}" "^CREATE SCHEMA|already exists"
@@ -256,6 +257,10 @@ run_and_expect "Create table" "CREATE TABLE iceberg.${SCHEMA}.${TABLE} (order_id
 run_and_expect "Insert rows" "INSERT INTO iceberg.${SCHEMA}.${TABLE} VALUES (1, 10.5), (2, 20.25)" "^INSERT: 2 rows$"
 run_and_expect "Row count" "SELECT count(*) AS c FROM iceberg.${SCHEMA}.${TABLE}" "^[[:space:]]*2[[:space:]]*$"
 run_and_expect "Describe table" "DESCRIBE iceberg.${SCHEMA}.${TABLE}" "order_id|amount"
+run_and_expect "Create view" "CREATE VIEW iceberg.${SCHEMA}.${VIEW} AS SELECT order_id, amount FROM iceberg.${SCHEMA}.${TABLE}" "^CREATE VIEW$"
+run_and_expect "View row count" "SELECT count(*) AS c FROM iceberg.${SCHEMA}.${VIEW}" "^[[:space:]]*2[[:space:]]*$"
+run_and_expect "Show create view" "SHOW CREATE VIEW iceberg.${SCHEMA}.${VIEW}" "CREATE VIEW iceberg\\.${SCHEMA}\\.${VIEW}"
+run_and_expect "Drop view" "DROP VIEW iceberg.${SCHEMA}.${VIEW}" "^DROP VIEW$"
 run_and_expect "Show tables" "SHOW TABLES FROM iceberg.${SCHEMA}" "${TABLE}"
 run_and_expect "Drop table" "DROP TABLE iceberg.${SCHEMA}.${TABLE}" "^DROP TABLE$"
 

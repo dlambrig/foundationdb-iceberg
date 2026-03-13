@@ -45,6 +45,7 @@ docker cp fdb:/var/fdb/fdb.cluster ./fdb.cluster
   - nested namespace creation and parent-filtered listing (`GET /v1/namespaces?parent=...`)
   - namespace properties updates (`POST /v1/namespaces/{ns}/properties`)
   - table create/get/list/delete
+  - view create/get/list/delete
   - table rename (`POST /v1/tables/rename`)
   - staged create behavior (`stage-create=true` returns load response without persisting table)
   - table commit updates (including snapshot and schema-evolution paths used in current tests)
@@ -53,10 +54,12 @@ docker cp fdb:/var/fdb/fdb.cluster ./fdb.cluster
   - sort order updates via commit actions (`add-sort-order`, `set-default-sort-order`)
   - snapshot ref removal via commit action (`remove-snapshot-ref`, with `main` protected)
   - snapshot removal via commit action (`remove-snapshots`, with ref/parent safety checks)
+  - view commit updates (`add-view-version`, `set-current-view-version`)
   - `assert-create` requirement handling on commit path (conflicts on existing tables)
   - `assert-last-assigned-partition-id` requirement validation
   - `assert-default-spec-id` requirement validation
   - `assert-default-sort-order-id` requirement validation
+  - `assert-view-uuid` requirement validation
   - duplicate table create rejected with conflict (`409`)
   - strict validation for unknown commit requirement types and malformed `assert-ref-snapshot-id` payloads
   - table location updates via commit action (`set-location`)

@@ -32,6 +32,7 @@ public class IcebergRestServer {
     private static final String CONFIG_RESPONSE = "{\"defaults\":{},\"overrides\":{}}";
     private static final String TABLE_PATH_PREFIX = "/v1/namespaces/";
     private static final String TABLES_SEGMENT = "/tables";
+    private static final String VIEWS_SEGMENT = "/views";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final Path DEFAULT_LOCAL_ROOT = Paths.get(System.getProperty("java.io.tmpdir"));
     private static final String DEFAULT_WAREHOUSE_LOCATION = "local:///iceberg_warehouse";
@@ -39,22 +40,30 @@ public class IcebergRestServer {
 
     private static NamespaceStore namespaceStore;
     private static TableStore tableStore;
+    private static ViewStore viewStore;
     private static final Map<String, Map<String, String>> namespaceProperties = new HashMap<>();
 
     public static void main(String[] args) throws IOException {
         boolean useFdb = isFdbEnabled(args);
-        startServer(PORT, buildNamespaceStore(useFdb), buildTableStore(useFdb));
+        startServer(PORT, buildNamespaceStore(useFdb), buildTableStore(useFdb), buildViewStore(useFdb));
         System.out.println("Iceberg REST server listening on http://localhost:" + PORT);
         System.out.println("Serving GET /v1/config");
         System.out.println("Serving GET /v1/namespaces");
         System.out.println("Serving POST /v1/namespaces");
         System.out.println("Serving GET /v1/namespaces/{ns}/tables/{table}");
         System.out.println("Serving POST /v1/namespaces/{ns}/tables");
+        System.out.println("Serving GET /v1/namespaces/{ns}/views/{view}");
+        System.out.println("Serving POST /v1/namespaces/{ns}/views");
     }
 
     static HttpServer startServer(int port, NamespaceStore nsStore, TableStore tblStore) throws IOException {
+        return startServer(port, nsStore, tblStore, new InMemoryViewStore());
+    }
+
+    static HttpServer startServer(int port, NamespaceStore nsStore, TableStore tblStore, ViewStore vwStore) throws IOException {
         namespaceStore = nsStore;
         tableStore = tblStore;
+        viewStore = vwStore;
         synchronized (namespaceProperties) {
             namespaceProperties.clear();
             for (String namespace : namespaceStore.listNamespaces()) {
@@ -94,6 +103,13 @@ public class IcebergRestServer {
             return new InMemoryTableStore();
         }
         return new FdbTableStore();
+    }
+
+    private static ViewStore buildViewStore(boolean useFdb) {
+        if (!useFdb) {
+            return new InMemoryViewStore();
+        }
+        return new FdbViewStore();
     }
 
     static String buildLoadTableResponseJson(String namespace, String createTableRequestBody) {
@@ -179,6 +195,80 @@ public class IcebergRestServer {
             return OBJECT_MAPPER.writeValueAsString(response);
         } catch (JsonProcessingException e) {
             throw new IllegalArgumentException("Failed to build table response");
+        }
+    }
+
+    static String buildLoadViewResponseJson(String namespace, String createViewRequestBody) {
+        JsonNode request;
+        try {
+            request = OBJECT_MAPPER.readTree(createViewRequestBody);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Invalid JSON request body");
+        }
+
+        String viewName = request.path("name").asText();
+        if (viewName == null || viewName.isEmpty()) {
+            throw new IllegalArgumentException("Missing view name");
+        }
+
+        JsonNode viewVersionNode = request.get("view-version");
+        if (viewVersionNode == null || !viewVersionNode.isObject()) {
+            throw new IllegalArgumentException("Missing or invalid view-version");
+        }
+        int currentVersionId = viewVersionNode.path("version-id").asInt(Integer.MIN_VALUE);
+        if (currentVersionId == Integer.MIN_VALUE) {
+            throw new IllegalArgumentException("view-version requires integer version-id");
+        }
+
+        JsonNode schemaNode = request.get("schema");
+        if (schemaNode == null || !schemaNode.isObject()) {
+            throw new IllegalArgumentException("Missing or invalid schema");
+        }
+        JsonNode schemaIdNode = schemaNode.get("schema-id");
+        if (schemaIdNode == null || !schemaIdNode.canConvertToInt()) {
+            throw new IllegalArgumentException("schema requires integer schema-id");
+        }
+
+        String viewUuid = UUID.randomUUID().toString();
+        String location = request.path("location").asText("");
+        if (location.isEmpty()) {
+            location = DEFAULT_WAREHOUSE_LOCATION + "/" + namespace + "/views/" + viewName;
+        }
+        String metadataLocation = DEFAULT_WAREHOUSE_LOCATION + "/_rest_metadata/" + viewUuid + "/00000-" + viewUuid + ".metadata.json";
+
+        ObjectNode metadata = OBJECT_MAPPER.createObjectNode();
+        metadata.put("format-version", 1);
+        metadata.put("view-uuid", viewUuid);
+        metadata.put("location", location);
+        metadata.put("current-version-id", currentVersionId);
+        metadata.put("last-updated-ms", System.currentTimeMillis());
+        ArrayNode versions = metadata.putArray("versions");
+        versions.add(viewVersionNode.deepCopy());
+        ArrayNode versionLog = metadata.putArray("version-log");
+        ObjectNode versionLogEntry = OBJECT_MAPPER.createObjectNode();
+        versionLogEntry.put("version-id", currentVersionId);
+        versionLogEntry.put("timestamp-ms", viewVersionNode.path("timestamp-ms").asLong(System.currentTimeMillis()));
+        versionLog.add(versionLogEntry);
+
+        ArrayNode schemas = metadata.putArray("schemas");
+        schemas.add(schemaNode.deepCopy());
+
+        ObjectNode properties = metadata.putObject("properties");
+        JsonNode propertiesNode = request.get("properties");
+        if (propertiesNode != null && propertiesNode.isObject()) {
+            propertiesNode.fields().forEachRemaining(entry -> properties.put(entry.getKey(), entry.getValue().asText("")));
+        }
+        metadata.putArray("metadata-log");
+
+        ObjectNode response = OBJECT_MAPPER.createObjectNode();
+        response.put("metadata-location", metadataLocation);
+        response.set("metadata", metadata);
+        response.putObject("config");
+
+        try {
+            return OBJECT_MAPPER.writeValueAsString(response);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Failed to build view response");
         }
     }
 
@@ -716,6 +806,142 @@ public class IcebergRestServer {
         }
     }
 
+    static String applyCommitToViewResponseJson(String existingResponseJson, String commitRequestBody) {
+        JsonNode existingRoot;
+        JsonNode commitRoot;
+        try {
+            existingRoot = OBJECT_MAPPER.readTree(existingResponseJson);
+            commitRoot = OBJECT_MAPPER.readTree(commitRequestBody);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Invalid JSON payload");
+        }
+
+        ObjectNode updatedRoot = existingRoot.deepCopy();
+        JsonNode metadataNode = updatedRoot.get("metadata");
+        if (metadataNode == null || !metadataNode.isObject()) {
+            throw new IllegalArgumentException("Stored view metadata is invalid");
+        }
+        ObjectNode metadata = (ObjectNode) metadataNode;
+        String currentMetadataLocation = updatedRoot.path("metadata-location").asText("");
+        if (currentMetadataLocation.isEmpty()) {
+            throw new IllegalArgumentException("Stored view metadata-location is invalid");
+        }
+
+        validateViewCommitRequirements(commitRoot, metadata);
+
+        JsonNode updatesNode = commitRoot.get("updates");
+        if (updatesNode == null || !updatesNode.isArray()) {
+            throw new IllegalArgumentException("Missing or invalid updates");
+        }
+
+        ArrayNode versions = ensureArray(metadata, "versions");
+        ArrayNode versionLog = ensureArray(metadata, "version-log");
+        ArrayNode schemas = ensureArray(metadata, "schemas");
+        ArrayNode metadataLog = ensureArray(metadata, "metadata-log");
+
+        for (JsonNode updateNode : updatesNode) {
+            String action = updateNode.path("action").asText("");
+            if (action.isEmpty()) {
+                throw new IllegalArgumentException("Missing update action");
+            }
+            if ("add-view-version".equals(action)) {
+                JsonNode viewVersion = updateNode.get("view-version");
+                if (viewVersion == null || !viewVersion.isObject()) {
+                    throw new IllegalArgumentException("add-view-version requires view-version object");
+                }
+                int versionId = viewVersion.path("version-id").asInt(Integer.MIN_VALUE);
+                if (versionId == Integer.MIN_VALUE) {
+                    throw new IllegalArgumentException("add-view-version requires integer version-id");
+                }
+                for (JsonNode version : versions) {
+                    if (version.path("version-id").asInt(Integer.MIN_VALUE) == versionId) {
+                        throw new IllegalArgumentException("add-view-version version-id already exists: " + versionId);
+                    }
+                }
+
+                int schemaId = viewVersion.path("schema-id").asInt(Integer.MIN_VALUE);
+                if (schemaId != Integer.MIN_VALUE && !schemaIdExists(schemas, schemaId)) {
+                    throw new IllegalArgumentException("add-view-version references unknown schema-id: " + schemaId);
+                }
+                versions.add(viewVersion.deepCopy());
+
+                ObjectNode logEntry = OBJECT_MAPPER.createObjectNode();
+                logEntry.put("version-id", versionId);
+                logEntry.put("timestamp-ms", viewVersion.path("timestamp-ms").asLong(System.currentTimeMillis()));
+                versionLog.add(logEntry);
+            } else if ("set-current-view-version".equals(action)) {
+                int versionId = updateNode.path("version-id").asInt(Integer.MIN_VALUE);
+                if (versionId == Integer.MIN_VALUE) {
+                    throw new IllegalArgumentException("set-current-view-version requires integer version-id");
+                }
+                boolean exists = false;
+                for (JsonNode version : versions) {
+                    if (version.path("version-id").asInt(Integer.MIN_VALUE) == versionId) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    throw new IllegalArgumentException("set-current-view-version references unknown version-id: " + versionId);
+                }
+                metadata.put("current-version-id", versionId);
+            } else if ("set-properties".equals(action)) {
+                JsonNode updates = updateNode.get("updates");
+                if (updates == null || !updates.isObject()) {
+                    throw new IllegalArgumentException("set-properties requires updates object");
+                }
+                ObjectNode properties = ensureObject(metadata, "properties");
+                updates.fields().forEachRemaining(entry -> properties.put(entry.getKey(), entry.getValue().asText("")));
+            } else if ("remove-properties".equals(action)) {
+                JsonNode removals = updateNode.get("removals");
+                if (removals == null || !removals.isArray()) {
+                    throw new IllegalArgumentException("remove-properties requires removals array");
+                }
+                ObjectNode properties = ensureObject(metadata, "properties");
+                for (JsonNode removal : removals) {
+                    if (!removal.isTextual() || removal.asText("").isEmpty()) {
+                        throw new IllegalArgumentException("remove-properties removals must contain non-empty string keys");
+                    }
+                    properties.remove(removal.asText());
+                }
+            } else if ("set-location".equals(action)) {
+                JsonNode locationNode = updateNode.get("location");
+                if (locationNode == null || !locationNode.isTextual() || locationNode.asText("").isEmpty()) {
+                    throw new IllegalArgumentException("set-location requires non-empty location");
+                }
+                String location = locationNode.asText();
+                try {
+                    URI parsed = URI.create(location);
+                    if (parsed.getScheme() == null || parsed.getScheme().isEmpty()) {
+                        throw new IllegalArgumentException("set-location requires absolute URI location");
+                    }
+                } catch (IllegalArgumentException e) {
+                    throw new IllegalArgumentException("set-location requires valid URI location");
+                }
+                metadata.put("location", location);
+            } else {
+                throw new IllegalArgumentException("Unsupported update action: " + action);
+            }
+        }
+
+        long now = System.currentTimeMillis();
+        metadata.put("last-updated-ms", now);
+        ObjectNode metadataLogEntry = OBJECT_MAPPER.createObjectNode();
+        metadataLogEntry.put("timestamp-ms", now);
+        metadataLogEntry.put("metadata-file", currentMetadataLocation);
+        metadataLog.add(metadataLogEntry);
+
+        String viewUuid = metadata.path("view-uuid").asText("");
+        String nextMetadataLocation = nextMetadataLocation(currentMetadataLocation, viewUuid);
+        updatedRoot.put("metadata-location", nextMetadataLocation);
+
+        try {
+            return OBJECT_MAPPER.writeValueAsString(updatedRoot);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Failed to serialize updated view metadata");
+        }
+    }
+
     private static void validateCommitRequirements(JsonNode commitRoot, ObjectNode metadata) {
         JsonNode requirements = commitRoot.get("requirements");
         if (requirements == null || requirements.isMissingNode()) {
@@ -790,6 +1016,36 @@ public class IcebergRestServer {
                 if (expected == Long.MIN_VALUE || expected != actual) {
                     throw new IllegalStateException("assert-default-sort-order-id failed");
                 }
+            } else if ("assert-view-uuid".equals(type)) {
+                String expected = requireUuidRequirement(requirement, "uuid", "assert-view-uuid");
+                String actual = metadata.path("view-uuid").asText("");
+                if (!expected.equals(actual)) {
+                    throw new IllegalStateException("assert-view-uuid failed");
+                }
+            } else {
+                throw new IllegalArgumentException("Unsupported requirement type: " + type);
+            }
+        }
+    }
+
+    private static void validateViewCommitRequirements(JsonNode commitRoot, ObjectNode metadata) {
+        JsonNode requirements = commitRoot.get("requirements");
+        if (requirements == null || requirements.isMissingNode()) {
+            return;
+        }
+        if (!requirements.isArray()) {
+            throw new IllegalArgumentException("Invalid requirements");
+        }
+        for (JsonNode requirement : requirements) {
+            if (!requirement.isObject()) {
+                throw new IllegalArgumentException("Invalid requirement entry");
+            }
+            String type = requirement.path("type").asText("");
+            if (type.isEmpty()) {
+                throw new IllegalArgumentException("Requirement type is missing");
+            }
+            if ("assert-create".equals(type)) {
+                throw new IllegalStateException("assert-create failed");
             } else if ("assert-view-uuid".equals(type)) {
                 String expected = requireUuidRequirement(requirement, "uuid", "assert-view-uuid");
                 String actual = metadata.path("view-uuid").asText("");
@@ -1083,6 +1339,11 @@ public class IcebergRestServer {
                     return;
                 }
 
+                if (path.startsWith(TABLE_PATH_PREFIX) && path.contains(VIEWS_SEGMENT)) {
+                    handleViewRoutes(exchange, method, path);
+                    return;
+                }
+
                 if ("GET".equals(method) || "DELETE".equals(method)) {
                     handleGetNamespace(exchange, method, path, exchange.getRequestURI().getQuery());
                     return;
@@ -1102,6 +1363,48 @@ public class IcebergRestServer {
             }
 
             sendIcebergError(exchange, 405, "Method Not Allowed", method, path);
+        }
+
+        private void handleViewRoutes(HttpExchange exchange, String method, String path) throws IOException {
+            String suffix = path.substring(TABLE_PATH_PREFIX.length());
+            String[] parts = suffix.split("/");
+            if (parts.length < 2 || !"views".equals(parts[1])) {
+                sendIcebergError(exchange, 404, "Not Found", method, path);
+                return;
+            }
+
+            String namespace = parts[0];
+            if (!namespaceStore.listNamespaces().contains(namespace)) {
+                sendIcebergError(exchange, 404, "Namespace not found: " + namespace, method, path);
+                return;
+            }
+
+            if ("POST".equals(method) && parts.length == 2) {
+                handleCreateView(exchange, method, path, namespace);
+                return;
+            }
+
+            if ("GET".equals(method) && parts.length == 2) {
+                handleListViews(exchange, method, path, namespace);
+                return;
+            }
+
+            if ("GET".equals(method) && parts.length == 3) {
+                handleGetView(exchange, method, path, namespace, parts[2]);
+                return;
+            }
+
+            if ("POST".equals(method) && parts.length == 3) {
+                handleCommitView(exchange, method, path, namespace, parts[2]);
+                return;
+            }
+
+            if ("DELETE".equals(method) && parts.length == 3) {
+                handleDeleteView(exchange, method, path, namespace, parts[2]);
+                return;
+            }
+
+            sendIcebergError(exchange, 404, "Not Found", method, path);
         }
 
         private void handleUpdateNamespaceProperties(HttpExchange exchange, String method, String path) throws IOException {
@@ -1251,6 +1554,18 @@ public class IcebergRestServer {
             sendJson(exchange, 200, normalizedResponseJson, method, path);
         }
 
+        private void handleGetView(HttpExchange exchange, String method, String path, String namespace, String view) throws IOException {
+            String responseJson = viewStore.getViewResponse(namespace, view);
+            if (responseJson == null) {
+                sendIcebergError(exchange, 404, "View not found: " + namespace + "." + view, method, path);
+                return;
+            }
+            String normalizedResponseJson = normalizeMetadataLocation(responseJson);
+            persistMetadataFile(normalizedResponseJson);
+            viewStore.putViewResponse(namespace, view, normalizedResponseJson);
+            sendJson(exchange, 200, normalizedResponseJson, method, path);
+        }
+
         private void handleListTables(HttpExchange exchange, String method, String path, String namespace) throws IOException {
             List<String> tables = tableStore.listTables(namespace);
             StringBuilder body = new StringBuilder();
@@ -1263,6 +1578,24 @@ public class IcebergRestServer {
                         .append(namespace)
                         .append("\"],\"name\":\"")
                         .append(escapeJson(tables.get(i)))
+                        .append("\"}");
+            }
+            body.append("]}");
+            sendJson(exchange, 200, body.toString(), method, path);
+        }
+
+        private void handleListViews(HttpExchange exchange, String method, String path, String namespace) throws IOException {
+            List<String> views = viewStore.listViews(namespace);
+            StringBuilder body = new StringBuilder();
+            body.append("{\"identifiers\":[");
+            for (int i = 0; i < views.size(); i++) {
+                if (i > 0) {
+                    body.append(",");
+                }
+                body.append("{\"namespace\":[\"")
+                        .append(namespace)
+                        .append("\"],\"name\":\"")
+                        .append(escapeJson(views.get(i)))
                         .append("\"}");
             }
             body.append("]}");
@@ -1327,6 +1660,64 @@ public class IcebergRestServer {
             sendJson(exchange, 200, normalizedResponseJson, method, path);
         }
 
+        private void handleCreateView(HttpExchange exchange, String method, String path, String namespace) throws IOException {
+            String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            System.out.println("Request body: " + requestBody);
+
+            String loadViewResponseJson;
+            try {
+                loadViewResponseJson = IcebergRestServer.buildLoadViewResponseJson(namespace, requestBody);
+            } catch (IllegalArgumentException e) {
+                sendIcebergError(exchange, 400, e.getMessage(), method, path);
+                return;
+            }
+
+            JsonNode root;
+            try {
+                root = OBJECT_MAPPER.readTree(requestBody);
+            } catch (JsonProcessingException e) {
+                sendIcebergError(exchange, 400, "Invalid JSON request body", method, path);
+                return;
+            }
+            String viewName = root.path("name").asText();
+            if (viewName == null || viewName.isEmpty()) {
+                sendIcebergError(exchange, 400, "Missing view name", method, path);
+                return;
+            }
+            if (viewStore.getViewResponse(namespace, viewName) != null) {
+                sendIcebergError(exchange, 409, "View already exists: " + namespace + "." + viewName, method, path);
+                return;
+            }
+            String normalizedResponseJson = normalizeMetadataLocation(loadViewResponseJson);
+            boolean stageCreate = root.path("stage-create").asBoolean(false);
+            if (!stageCreate) {
+                viewStore.putViewResponse(namespace, viewName, normalizedResponseJson);
+                IcebergRestServer.persistMetadataFile(normalizedResponseJson);
+            }
+            sendJson(exchange, 200, normalizedResponseJson, method, path);
+        }
+
+        private void handleCommitView(HttpExchange exchange, String method, String path, String namespace, String view) throws IOException {
+            String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            System.out.println("Request body: " + requestBody);
+            String updatedResponseJson;
+            try {
+                updatedResponseJson = viewStore.commitView(namespace, view, requestBody);
+            } catch (ViewStore.ViewNotFoundException e) {
+                sendIcebergError(exchange, 404, e.getMessage(), method, path);
+                return;
+            } catch (IllegalArgumentException e) {
+                sendIcebergError(exchange, 400, e.getMessage(), method, path);
+                return;
+            } catch (IllegalStateException e) {
+                sendIcebergError(exchange, 409, e.getMessage(), method, path);
+                return;
+            }
+
+            String normalizedResponseJson = normalizeMetadataLocation(updatedResponseJson);
+            sendJson(exchange, 200, normalizedResponseJson, method, path);
+        }
+
         private void handleCreateNamespace(HttpExchange exchange, String method, String path) throws IOException {
             String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             System.out.println("Request body: " + requestBody);
@@ -1374,6 +1765,10 @@ public class IcebergRestServer {
                 sendIcebergError(exchange, 409, "Namespace not empty: " + namespace, method, path);
                 return;
             }
+            if (!viewStore.listViews(namespace).isEmpty()) {
+                sendIcebergError(exchange, 409, "Namespace not empty: " + namespace, method, path);
+                return;
+            }
             String prefix = namespace + ".";
             for (String existing : namespaceStore.listNamespaces()) {
                 if (existing.startsWith(prefix)) {
@@ -1391,6 +1786,14 @@ public class IcebergRestServer {
         private void handleDeleteTable(HttpExchange exchange, String method, String path, String namespace, String table) throws IOException {
             if (!tableStore.deleteTable(namespace, table)) {
                 sendIcebergError(exchange, 404, "Table not found: " + namespace + "." + table, method, path);
+                return;
+            }
+            sendNoContent(exchange, method, path);
+        }
+
+        private void handleDeleteView(HttpExchange exchange, String method, String path, String namespace, String view) throws IOException {
+            if (!viewStore.deleteView(namespace, view)) {
+                sendIcebergError(exchange, 404, "View not found: " + namespace + "." + view, method, path);
                 return;
             }
             sendNoContent(exchange, method, path);

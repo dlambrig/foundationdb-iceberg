@@ -41,6 +41,33 @@ class IcebergRestServerLogicTest {
     }
 
     @Test
+    void buildLoadViewResponseJsonUsesLocalLocations() throws Exception {
+        String response = IcebergRestServer.buildLoadViewResponseJson(
+                "sales",
+                """
+                {
+                  "name":"orders_view",
+                  "view-version":{"version-id":1,"timestamp-ms":1700000000000,"schema-id":0},
+                  "schema":{"type":"struct","schema-id":0,"fields":[]},
+                  "properties":{"owner":"analytics"}
+                }
+                """);
+        JsonNode root = MAPPER.readTree(response);
+
+        String metadataLocation = root.path("metadata-location").asText();
+        String viewLocation = root.path("metadata").path("location").asText();
+
+        assertTrue(metadataLocation.startsWith("local:///iceberg_warehouse/_rest_metadata/"));
+        assertEquals("local:///iceberg_warehouse/sales/views/orders_view", viewLocation);
+        assertEquals(1, root.path("metadata").path("format-version").asInt());
+        assertTrue(root.path("metadata").has("view-uuid"));
+        assertEquals(1, root.path("metadata").path("current-version-id").asInt());
+        assertEquals(1, root.path("metadata").path("versions").size());
+        assertEquals(1, root.path("metadata").path("version-log").size());
+        assertEquals("analytics", root.path("metadata").path("properties").path("owner").asText());
+    }
+
+    @Test
     void applyCommitUpdatesSnapshotsRefsStatsAndSchema() throws Exception {
         String createRequest = """
                 {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[
@@ -929,6 +956,70 @@ class IcebergRestServerLogicTest {
                 IllegalArgumentException.class,
                 () -> IcebergRestServer.applyCommitToTableResponseJson(withViewUuid, malformedBadUuid));
         assertTrue(ex3.getMessage().contains("requires valid UUID"));
+    }
+
+    @Test
+    void applyCommitToViewResponseJsonSupportsVersionsAndProperties() throws Exception {
+        String base = IcebergRestServer.buildLoadViewResponseJson(
+                "sales",
+                """
+                {
+                  "name":"orders_view",
+                  "view-version":{"version-id":1,"timestamp-ms":1700000000000,"schema-id":0},
+                  "schema":{"type":"struct","schema-id":0,"fields":[]}
+                }
+                """);
+        String viewUuid = MAPPER.readTree(base).path("metadata").path("view-uuid").asText();
+
+        String commit = """
+                {
+                  "requirements":[{"type":"assert-view-uuid","uuid":"%s"}],
+                  "updates":[
+                    {"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000}},
+                    {"action":"set-current-view-version","version-id":2},
+                    {"action":"set-properties","updates":{"owner":"analytics-team"}},
+                    {"action":"set-location","location":"local:///iceberg_warehouse_custom/sales/views/orders_view"}
+                  ]
+                }
+                """.formatted(viewUuid);
+        String updated = IcebergRestServer.applyCommitToViewResponseJson(base, commit);
+        JsonNode metadata = MAPPER.readTree(updated).path("metadata");
+
+        assertEquals(2, metadata.path("versions").size());
+        assertEquals(2, metadata.path("version-log").size());
+        assertEquals(2, metadata.path("current-version-id").asInt());
+        assertEquals("analytics-team", metadata.path("properties").path("owner").asText());
+        assertEquals("local:///iceberg_warehouse_custom/sales/views/orders_view", metadata.path("location").asText());
+        assertEquals(1, metadata.path("metadata-log").size());
+    }
+
+    @Test
+    void applyCommitToViewResponseJsonValidatesVersionActions() throws Exception {
+        String base = IcebergRestServer.buildLoadViewResponseJson(
+                "sales",
+                """
+                {
+                  "name":"orders_view",
+                  "view-version":{"version-id":1,"timestamp-ms":1700000000000,"schema-id":0},
+                  "schema":{"type":"struct","schema-id":0,"fields":[]}
+                }
+                """);
+
+        String setUnknownVersion = """
+                {"updates":[{"action":"set-current-view-version","version-id":42}]}
+                """;
+        IllegalArgumentException ex1 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToViewResponseJson(base, setUnknownVersion));
+        assertTrue(ex1.getMessage().contains("unknown version-id"));
+
+        String badAddVersion = """
+                {"updates":[{"action":"add-view-version","view-version":{"schema-id":0}}]}
+                """;
+        IllegalArgumentException ex2 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToViewResponseJson(base, badAddVersion));
+        assertTrue(ex2.getMessage().contains("requires integer version-id"));
     }
 
     @Test
