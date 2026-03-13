@@ -91,5 +91,14 @@ This script:
 - runs SQL checks for create/insert/read/snapshots/schema-evolution/rename/drop lifecycle
 - writes logs under `integration/logs/`
 
+For a fast Trino compatibility subset (without full integration flow):
+
+```bash
+./integration/trino_smoke.sh
+```
+
+By default this script starts IcebergRestServer and Trino (if Trino is not already running).  
+Use `--fdb` for FoundationDB mode, `--no-start-server` for an existing server on `localhost:8181`, or `--no-start-trino` for an existing Trino on `localhost:8080`.
+
 ## Current Scope
 This is a prototype, not a full production Iceberg REST catalog implementation yet.
