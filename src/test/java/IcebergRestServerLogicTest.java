@@ -188,6 +188,42 @@ class IcebergRestServerLogicTest {
     }
 
     @Test
+    void removePartitionStatisticsRemovesOnlyMatchingSnapshotEntriesAndValidatesPayload() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String seeded = """
+                {
+                  "updates": [
+                    {"action":"add-snapshot","snapshot":{"sequence-number":1,"snapshot-id":101,"timestamp-ms":1700000000000,"schema-id":0}},
+                    {"action":"add-snapshot","snapshot":{"sequence-number":2,"snapshot-id":202,"timestamp-ms":1700000001000,"schema-id":0}},
+                    {"action":"set-partition-statistics","partition-statistics":{"snapshot-id":101,"statistics-path":"local:///iceberg_warehouse/sales/orders/metadata/part-stats-101"}},
+                    {"action":"set-partition-statistics","partition-statistics":{"snapshot-id":202,"statistics-path":"local:///iceberg_warehouse/sales/orders/metadata/part-stats-202"}}
+                  ]
+                }
+                """;
+        String withPartitionStats = IcebergRestServer.applyCommitToTableResponseJson(base, seeded);
+
+        String removeOne = """
+                {"updates":[{"action":"remove-partition-statistics","snapshot-ids":[202,999]}]}
+                """;
+        String updated = IcebergRestServer.applyCommitToTableResponseJson(withPartitionStats, removeOne);
+        JsonNode partitionStats = MAPPER.readTree(updated).path("metadata").path("partition-statistics");
+        assertEquals(1, partitionStats.size());
+        assertEquals(101L, partitionStats.get(0).path("snapshot-id").asLong());
+
+        String badPayload = """
+                {"updates":[{"action":"remove-partition-statistics","snapshot-ids":"not-an-array"}]}
+                """;
+        IllegalArgumentException ex = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(withPartitionStats, badPayload));
+        assertTrue(ex.getMessage().contains("requires snapshot-ids array"));
+    }
+
+    @Test
     void setCurrentSchemaWithExplicitIdWorksAndUnknownIdFails() throws Exception {
         String createRequest = """
                 {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[
