@@ -383,6 +383,72 @@ class IcebergRestServerLogicTest {
     }
 
     @Test
+    void addAndRemoveEncryptionKeyUpdatesMetadata() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String add = """
+                {"updates":[{"action":"add-encryption-key","encryption-key":{"key-id":1,"wrapped-key":"abc","aad-prefix":"sales/orders"}}]}
+                """;
+        String withKey = IcebergRestServer.applyCommitToTableResponseJson(base, add);
+        JsonNode keysAfterAdd = MAPPER.readTree(withKey).path("metadata").path("encryption-keys");
+        assertEquals(1, keysAfterAdd.size());
+        assertEquals(1L, keysAfterAdd.get(0).path("key-id").asLong());
+        assertEquals("abc", keysAfterAdd.get(0).path("wrapped-key").asText());
+
+        String remove = """
+                {"updates":[{"action":"remove-encryption-key","key-id":1}]}
+                """;
+        String withoutKey = IcebergRestServer.applyCommitToTableResponseJson(withKey, remove);
+        JsonNode keysAfterRemove = MAPPER.readTree(withoutKey).path("metadata").path("encryption-keys");
+        assertEquals(0, keysAfterRemove.size());
+    }
+
+    @Test
+    void encryptionKeyValidationRejectsBadPayloadsAndDuplicates() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String missingObject = """
+                {"updates":[{"action":"add-encryption-key"}]}
+                """;
+        IllegalArgumentException ex1 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, missingObject));
+        assertTrue(ex1.getMessage().contains("requires encryption-key object"));
+
+        String missingKeyId = """
+                {"updates":[{"action":"add-encryption-key","encryption-key":{"wrapped-key":"abc"}}]}
+                """;
+        IllegalArgumentException ex2 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, missingKeyId));
+        assertTrue(ex2.getMessage().contains("requires integer key-id"));
+
+        String add = """
+                {"updates":[{"action":"add-encryption-key","encryption-key":{"key-id":7,"wrapped-key":"abc"}}]}
+                """;
+        String withKey = IcebergRestServer.applyCommitToTableResponseJson(base, add);
+
+        IllegalArgumentException ex3 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(withKey, add));
+        assertTrue(ex3.getMessage().contains("key-id already exists"));
+
+        String badRemove = """
+                {"updates":[{"action":"remove-encryption-key","key-id":"x"}]}
+                """;
+        IllegalArgumentException ex4 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(withKey, badRemove));
+        assertTrue(ex4.getMessage().contains("key-id must be an integer"));
+    }
+
+    @Test
     void addSpecAndSetDefaultSpecUpdateMutatePartitionMetadata() throws Exception {
         String createRequest = """
                 {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[
