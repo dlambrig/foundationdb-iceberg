@@ -41,6 +41,26 @@ cd /Users/dlambrig/apple/foundationdb-iceberg
 ./integration/trino_smoke.sh --fdb
 ```
 
+## Run FDB-Focused Integration Checks
+
+```bash
+cd /Users/dlambrig/apple/foundationdb-iceberg
+./integration/run_fdb_integration.sh
+```
+
+This script:
+- runs `trino_smoke.sh --fdb` (unless `--no-smoke` is used)
+- starts `IcebergRestServer` in FDB mode
+- validates restart/reload behavior (table still resolves after server restart)
+- validates concurrent writer conflict behavior (one commit succeeds, one conflicts)
+
+Options:
+
+```bash
+./integration/run_fdb_integration.sh --no-smoke
+./integration/run_fdb_integration.sh --no-start-server
+```
+
 Use already-running server on `:8181`:
 
 ```bash
