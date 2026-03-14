@@ -1385,7 +1385,7 @@ public class IcebergRestServer {
             }
 
             if ("GET".equals(method) && parts.length == 2) {
-                handleListViews(exchange, method, path, namespace);
+                handleListViews(exchange, method, path, namespace, exchange.getRequestURI().getQuery());
                 return;
             }
 
@@ -1485,7 +1485,7 @@ public class IcebergRestServer {
             }
 
             if ("GET".equals(method) && parts.length == 2) {
-                handleListTables(exchange, method, path, namespace);
+                handleListTables(exchange, method, path, namespace, exchange.getRequestURI().getQuery());
                 return;
             }
 
@@ -1514,7 +1514,20 @@ public class IcebergRestServer {
 
         private void handleGetNamespace(HttpExchange exchange, String method, String path, String query) throws IOException {
             if ("/v1/namespaces".equals(path) || "/v1/namespaces/".equals(path)) {
-                sendJson(exchange, 200, listNamespacesJson(readQueryParam(query, "parent")), method, path);
+                String parent = readQueryParam(query, "parent");
+                String pageToken = readQueryParam(query, "page-token");
+                Integer pageSize;
+                try {
+                    pageSize = parsePageSize(readQueryParam(query, "page-size"));
+                } catch (IllegalArgumentException e) {
+                    sendIcebergError(exchange, 400, e.getMessage(), method, path);
+                    return;
+                }
+                try {
+                    sendJson(exchange, 200, listNamespacesJson(parent, pageToken, pageSize), method, path);
+                } catch (IllegalArgumentException e) {
+                    sendIcebergError(exchange, 400, e.getMessage(), method, path);
+                }
                 return;
             }
 
@@ -1566,39 +1579,81 @@ public class IcebergRestServer {
             sendJson(exchange, 200, normalizedResponseJson, method, path);
         }
 
-        private void handleListTables(HttpExchange exchange, String method, String path, String namespace) throws IOException {
+        private void handleListTables(HttpExchange exchange, String method, String path, String namespace, String query) throws IOException {
             List<String> tables = tableStore.listTables(namespace);
+            Integer pageSize;
+            try {
+                pageSize = parsePageSize(readQueryParam(query, "page-size"));
+            } catch (IllegalArgumentException e) {
+                sendIcebergError(exchange, 400, e.getMessage(), method, path);
+                return;
+            }
+            PageResult page;
+            try {
+                page = paginate(tables, readQueryParam(query, "page-token"), pageSize);
+            } catch (IllegalArgumentException e) {
+                sendIcebergError(exchange, 400, e.getMessage(), method, path);
+                return;
+            }
+
             StringBuilder body = new StringBuilder();
             body.append("{\"identifiers\":[");
-            for (int i = 0; i < tables.size(); i++) {
+            for (int i = 0; i < page.items().size(); i++) {
                 if (i > 0) {
                     body.append(",");
                 }
                 body.append("{\"namespace\":[\"")
                         .append(namespace)
                         .append("\"],\"name\":\"")
-                        .append(escapeJson(tables.get(i)))
+                        .append(escapeJson(page.items().get(i)))
                         .append("\"}");
             }
-            body.append("]}");
+            body.append("]");
+            if (page.nextToken() != null) {
+                body.append(",\"next-page-token\":\"")
+                        .append(escapeJson(page.nextToken()))
+                        .append("\"");
+            }
+            body.append("}");
             sendJson(exchange, 200, body.toString(), method, path);
         }
 
-        private void handleListViews(HttpExchange exchange, String method, String path, String namespace) throws IOException {
+        private void handleListViews(HttpExchange exchange, String method, String path, String namespace, String query) throws IOException {
             List<String> views = viewStore.listViews(namespace);
+            Integer pageSize;
+            try {
+                pageSize = parsePageSize(readQueryParam(query, "page-size"));
+            } catch (IllegalArgumentException e) {
+                sendIcebergError(exchange, 400, e.getMessage(), method, path);
+                return;
+            }
+            PageResult page;
+            try {
+                page = paginate(views, readQueryParam(query, "page-token"), pageSize);
+            } catch (IllegalArgumentException e) {
+                sendIcebergError(exchange, 400, e.getMessage(), method, path);
+                return;
+            }
+
             StringBuilder body = new StringBuilder();
             body.append("{\"identifiers\":[");
-            for (int i = 0; i < views.size(); i++) {
+            for (int i = 0; i < page.items().size(); i++) {
                 if (i > 0) {
                     body.append(",");
                 }
                 body.append("{\"namespace\":[\"")
                         .append(namespace)
                         .append("\"],\"name\":\"")
-                        .append(escapeJson(views.get(i)))
+                        .append(escapeJson(page.items().get(i)))
                         .append("\"}");
             }
-            body.append("]}");
+            body.append("]");
+            if (page.nextToken() != null) {
+                body.append(",\"next-page-token\":\"")
+                        .append(escapeJson(page.nextToken()))
+                        .append("\"");
+            }
+            body.append("}");
             sendJson(exchange, 200, body.toString(), method, path);
         }
 
@@ -1868,15 +1923,13 @@ public class IcebergRestServer {
             return loadTableResponseJson;
         }
 
-        private static String listNamespacesJson(String parent) {
+        private static String listNamespacesJson(String parent, String pageToken, Integer pageSize) {
             List<String> namespaces = namespaceStore.listNamespaces();
+            List<String> filtered = new ArrayList<>();
             StringBuilder builder = new StringBuilder();
-            builder.append("{\"namespaces\":[");
             String parentPrefix = parent == null ? null : parent + ".";
             int parentDepth = parent == null ? 0 : parent.split("\\.").length;
-            int written = 0;
-            for (int i = 0; i < namespaces.size(); i++) {
-                String namespace = namespaces.get(i);
+            for (String namespace : namespaces) {
                 if (parent != null) {
                     if (!namespace.startsWith(parentPrefix)) {
                         continue;
@@ -1885,14 +1938,67 @@ public class IcebergRestServer {
                         continue;
                     }
                 }
-                if (written > 0) {
+                filtered.add(namespace);
+            }
+
+            PageResult page = paginate(filtered, pageToken, pageSize);
+
+            builder.append("{\"namespaces\":[");
+            for (int i = 0; i < page.items().size(); i++) {
+                if (i > 0) {
                     builder.append(",");
                 }
-                builder.append(namespaceArrayJson(namespace));
-                written++;
+                builder.append(namespaceArrayJson(page.items().get(i)));
             }
-            builder.append("]}");
+            builder.append("]");
+            if (page.nextToken() != null) {
+                builder.append(",\"next-page-token\":\"")
+                        .append(escapeJson(page.nextToken()))
+                        .append("\"");
+            }
+            builder.append("}");
             return builder.toString();
+        }
+
+        private static Integer parsePageSize(String pageSizeRaw) {
+            if (pageSizeRaw == null || pageSizeRaw.isBlank()) {
+                return null;
+            }
+            int parsed;
+            try {
+                parsed = Integer.parseInt(pageSizeRaw);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("Invalid page-size");
+            }
+            if (parsed <= 0) {
+                throw new IllegalArgumentException("Invalid page-size");
+            }
+            return parsed;
+        }
+
+        private static PageResult paginate(List<String> values, String pageToken, Integer pageSize) {
+            int startIndex = 0;
+            if (pageToken != null && !pageToken.isBlank()) {
+                int found = values.indexOf(pageToken);
+                if (found < 0) {
+                    throw new IllegalArgumentException("Invalid page-token");
+                }
+                startIndex = found + 1;
+            }
+
+            int endIndex = values.size();
+            String nextToken = null;
+            if (pageSize != null) {
+                endIndex = Math.min(values.size(), startIndex + pageSize);
+                if (endIndex < values.size() && endIndex > startIndex) {
+                    nextToken = values.get(endIndex - 1);
+                }
+            }
+            List<String> pageItems = new ArrayList<>();
+            for (int i = startIndex; i < endIndex; i++) {
+                pageItems.add(values.get(i));
+            }
+            return new PageResult(pageItems, nextToken);
         }
 
         private static String namespaceArrayJson(String namespace) {
@@ -1943,6 +2049,8 @@ public class IcebergRestServer {
             builder.append("]");
             return builder.toString();
         }
+
+        private record PageResult(List<String> items, String nextToken) {}
     }
 
     private static class NotFoundHandler implements HttpHandler {

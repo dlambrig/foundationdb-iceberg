@@ -122,6 +122,30 @@ class IcebergRestServerHttpTest {
     }
 
     @Test
+    void tablePaginationReturnsNextPageTokenAndContinuation() throws Exception {
+        request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
+        String tableA = "{\"name\":\"a\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
+        String tableB = "{\"name\":\"b\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
+        String tableC = "{\"name\":\"c\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables", tableA).statusCode);
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables", tableB).statusCode);
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables", tableC).statusCode);
+
+        HttpResponse page1 = request("GET", "/v1/namespaces/analytics/tables?page-size=2", null);
+        assertEquals(200, page1.statusCode);
+        JsonNode page1Json = MAPPER.readTree(page1.body);
+        assertEquals(2, page1Json.path("identifiers").size());
+        assertEquals("b", page1Json.path("next-page-token").asText());
+
+        HttpResponse page2 = request("GET", "/v1/namespaces/analytics/tables?page-size=2&page-token=b", null);
+        assertEquals(200, page2.statusCode);
+        JsonNode page2Json = MAPPER.readTree(page2.body);
+        assertEquals(1, page2Json.path("identifiers").size());
+        assertEquals("c", page2Json.path("identifiers").get(0).path("name").asText());
+        assertTrue(page2Json.path("next-page-token").isMissingNode());
+    }
+
+    @Test
     void createListCommitAndDeleteViewWorks() throws Exception {
         request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
 
@@ -171,6 +195,37 @@ class IcebergRestServerHttpTest {
         HttpResponse deleteView = request("DELETE", "/v1/namespaces/analytics/views/orders_view", null);
         assertEquals(204, deleteView.statusCode);
         assertEquals(404, request("GET", "/v1/namespaces/analytics/views/orders_view", null).statusCode);
+    }
+
+    @Test
+    void viewPaginationReturnsNextPageTokenAndContinuation() throws Exception {
+        request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
+
+        String createA = """
+                {"name":"a","view-version":{"version-id":1,"timestamp-ms":1700000000000,"schema-id":0},"schema":{"type":"struct","schema-id":0,"fields":[]}}
+                """;
+        String createB = """
+                {"name":"b","view-version":{"version-id":1,"timestamp-ms":1700000000000,"schema-id":0},"schema":{"type":"struct","schema-id":0,"fields":[]}}
+                """;
+        String createC = """
+                {"name":"c","view-version":{"version-id":1,"timestamp-ms":1700000000000,"schema-id":0},"schema":{"type":"struct","schema-id":0,"fields":[]}}
+                """;
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/views", createA).statusCode);
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/views", createB).statusCode);
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/views", createC).statusCode);
+
+        HttpResponse page1 = request("GET", "/v1/namespaces/analytics/views?page-size=2", null);
+        assertEquals(200, page1.statusCode);
+        JsonNode page1Json = MAPPER.readTree(page1.body);
+        assertEquals(2, page1Json.path("identifiers").size());
+        assertEquals("b", page1Json.path("next-page-token").asText());
+
+        HttpResponse page2 = request("GET", "/v1/namespaces/analytics/views?page-size=2&page-token=b", null);
+        assertEquals(200, page2.statusCode);
+        JsonNode page2Json = MAPPER.readTree(page2.body);
+        assertEquals(1, page2Json.path("identifiers").size());
+        assertEquals("c", page2Json.path("identifiers").get(0).path("name").asText());
+        assertTrue(page2Json.path("next-page-token").isMissingNode());
     }
 
     @Test
@@ -350,6 +405,37 @@ class IcebergRestServerHttpTest {
         assertEquals(200, response.statusCode);
         JsonNode namespaces = MAPPER.readTree(response.body).path("namespaces");
         assertEquals(2, namespaces.size());
+    }
+
+    @Test
+    void namespacePaginationWithParentFilterReturnsNextPageTokenAndContinuation() throws Exception {
+        assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}").statusCode);
+        assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\",\"a\"],\"properties\":{}}").statusCode);
+        assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\",\"b\"],\"properties\":{}}").statusCode);
+        assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\",\"c\"],\"properties\":{}}").statusCode);
+
+        HttpResponse page1 = request("GET", "/v1/namespaces?parent=analytics&page-size=2", null);
+        assertEquals(200, page1.statusCode);
+        JsonNode page1Json = MAPPER.readTree(page1.body);
+        assertEquals(2, page1Json.path("namespaces").size());
+        assertEquals("analytics.b", page1Json.path("next-page-token").asText());
+
+        HttpResponse page2 = request("GET", "/v1/namespaces?parent=analytics&page-size=2&page-token=analytics.b", null);
+        assertEquals(200, page2.statusCode);
+        JsonNode page2Json = MAPPER.readTree(page2.body);
+        assertEquals(1, page2Json.path("namespaces").size());
+        assertTrue(page2Json.path("next-page-token").isMissingNode());
+    }
+
+    @Test
+    void paginationRejectsInvalidPageParameters() throws Exception {
+        request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
+
+        HttpResponse badSize = request("GET", "/v1/namespaces?page-size=0", null);
+        assertEquals(400, badSize.statusCode);
+
+        HttpResponse badToken = request("GET", "/v1/namespaces?page-token=missing", null);
+        assertEquals(400, badToken.statusCode);
     }
 
     @Test

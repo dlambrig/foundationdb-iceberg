@@ -43,6 +43,7 @@ docker cp fdb:/var/fdb/fdb.cluster ./fdb.cluster
   - catalog config
   - namespace list/create/get/delete
   - nested namespace creation and parent-filtered listing (`GET /v1/namespaces?parent=...`)
+  - list pagination for namespaces/tables/views (`page-size`, `page-token`, `next-page-token`)
   - namespace properties updates (`POST /v1/namespaces/{ns}/properties`)
   - table create/get/list/delete
   - view create/get/list/delete
