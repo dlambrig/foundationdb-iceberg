@@ -40,16 +40,16 @@ class FdbMetricsStore implements MetricsStore {
 
                 String value = new String(row.getValue(), StandardCharsets.UTF_8);
                 int splitAt = value.indexOf('\n');
-                String type;
-                String payload;
+                String reportType;
+                String payloadJson;
                 if (splitAt >= 0) {
-                    type = value.substring(0, splitAt);
-                    payload = value.substring(splitAt + 1);
+                    reportType = value.substring(0, splitAt);
+                    payloadJson = value.substring(splitAt + 1);
                 } else {
-                    type = "unknown";
-                    payload = value;
+                    reportType = "unknown";
+                    payloadJson = value;
                 }
-                records.add(new MetricRecord(recordedAtMs, type, payload));
+                records.add(new MetricRecord(recordedAtMs, reportType, payloadJson));
             }
             return records;
         });

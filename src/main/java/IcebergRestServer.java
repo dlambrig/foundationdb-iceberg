@@ -41,11 +41,12 @@ public class IcebergRestServer {
     private static NamespaceStore namespaceStore;
     private static TableStore tableStore;
     private static ViewStore viewStore;
+    private static MetricsStore metricsStore;
     private static final Map<String, Map<String, String>> namespaceProperties = new HashMap<>();
 
     public static void main(String[] args) throws IOException {
         boolean useFdb = isFdbEnabled(args);
-        startServer(PORT, buildNamespaceStore(useFdb), buildTableStore(useFdb), buildViewStore(useFdb));
+        startServer(PORT, buildNamespaceStore(useFdb), buildTableStore(useFdb), buildViewStore(useFdb), buildMetricsStore(useFdb));
         System.out.println("Iceberg REST server listening on http://localhost:" + PORT);
         System.out.println("Serving GET /v1/config");
         System.out.println("Serving GET /v1/namespaces");
@@ -57,13 +58,18 @@ public class IcebergRestServer {
     }
 
     static HttpServer startServer(int port, NamespaceStore nsStore, TableStore tblStore) throws IOException {
-        return startServer(port, nsStore, tblStore, new InMemoryViewStore());
+        return startServer(port, nsStore, tblStore, new InMemoryViewStore(), new InMemoryMetricsStore());
     }
 
     static HttpServer startServer(int port, NamespaceStore nsStore, TableStore tblStore, ViewStore vwStore) throws IOException {
+        return startServer(port, nsStore, tblStore, vwStore, new InMemoryMetricsStore());
+    }
+
+    static HttpServer startServer(int port, NamespaceStore nsStore, TableStore tblStore, ViewStore vwStore, MetricsStore mStore) throws IOException {
         namespaceStore = nsStore;
         tableStore = tblStore;
         viewStore = vwStore;
+        metricsStore = mStore;
         synchronized (namespaceProperties) {
             namespaceProperties.clear();
             for (String namespace : namespaceStore.listNamespaces()) {
@@ -110,6 +116,13 @@ public class IcebergRestServer {
             return new InMemoryViewStore();
         }
         return new FdbViewStore();
+    }
+
+    private static MetricsStore buildMetricsStore(boolean useFdb) {
+        if (!useFdb) {
+            return new InMemoryMetricsStore();
+        }
+        return new FdbMetricsStore();
     }
 
     static String buildLoadTableResponseJson(String namespace, String createTableRequestBody) {
@@ -229,6 +242,20 @@ public class IcebergRestServer {
         if (schemaIdNode == null || !schemaIdNode.canConvertToInt()) {
             throw new IllegalArgumentException("schema requires integer schema-id");
         }
+        int schemaId = schemaIdNode.asInt(Integer.MIN_VALUE);
+
+        JsonNode viewVersionSchemaIdNode = viewVersionNode.get("schema-id");
+        if (viewVersionSchemaIdNode == null || !viewVersionSchemaIdNode.canConvertToInt()) {
+            throw new IllegalArgumentException("view-version requires integer schema-id");
+        }
+        if (viewVersionSchemaIdNode.asInt(Integer.MIN_VALUE) != schemaId) {
+            throw new IllegalArgumentException("view-version schema-id must match schema schema-id");
+        }
+
+        JsonNode timestampNode = viewVersionNode.get("timestamp-ms");
+        if (timestampNode == null || !timestampNode.canConvertToLong()) {
+            throw new IllegalArgumentException("view-version requires integer timestamp-ms");
+        }
 
         String viewUuid = UUID.randomUUID().toString();
         String location = request.path("location").asText("");
@@ -256,7 +283,10 @@ public class IcebergRestServer {
 
         ObjectNode properties = metadata.putObject("properties");
         JsonNode propertiesNode = request.get("properties");
-        if (propertiesNode != null && propertiesNode.isObject()) {
+        if (propertiesNode != null) {
+            if (!propertiesNode.isObject()) {
+                throw new IllegalArgumentException("Invalid properties");
+            }
             propertiesNode.fields().forEachRemaining(entry -> properties.put(entry.getKey(), entry.getValue().asText("")));
         }
         metadata.putArray("metadata-log");
@@ -1573,7 +1603,7 @@ public class IcebergRestServer {
             }
 
             if ("POST".equals(method) && parts.length == 4 && "metrics".equals(parts[3])) {
-                sendNoContent(exchange, method, path);
+                handleReportMetrics(exchange, method, path, namespace, parts[2]);
                 return;
             }
 
@@ -1762,6 +1792,24 @@ public class IcebergRestServer {
             sendJson(exchange, 200, normalizedResponseJson, method, path);
         }
 
+        private void handleReportMetrics(HttpExchange exchange, String method, String path, String namespace, String table) throws IOException {
+            if (tableStore.getTableResponse(namespace, table) == null) {
+                sendIcebergError(exchange, 404, "Table not found: " + namespace + "." + table, method, path);
+                return;
+            }
+            String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            ReportMetricsPayload payload;
+            try {
+                payload = parseReportMetricsPayload(requestBody);
+            } catch (IllegalArgumentException e) {
+                sendIcebergError(exchange, 400, e.getMessage(), method, path);
+                return;
+            }
+            metricsStore.recordTableMetrics(namespace, table, payload.reportType(), payload.normalizedPayloadJson());
+            System.out.println("Stored metrics report type=" + payload.reportType() + " for " + namespace + "." + table);
+            sendNoContent(exchange, method, path);
+        }
+
         private void handleCommitTable(HttpExchange exchange, String method, String path, String namespace, String table) throws IOException {
             String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             System.out.println("Request body: " + requestBody);
@@ -1870,6 +1918,10 @@ public class IcebergRestServer {
 
             Map<String, String> properties = new LinkedHashMap<>();
             JsonNode props = root.path("properties");
+            if (!props.isMissingNode() && !props.isObject()) {
+                sendIcebergError(exchange, 400, "Invalid properties", method, path);
+                return;
+            }
             if (props.isObject()) {
                 props.fields().forEachRemaining(entry -> properties.put(entry.getKey(), entry.getValue().asText("")));
             }
@@ -2121,6 +2173,40 @@ public class IcebergRestServer {
         private record PageResult(List<String> items, String nextToken) {}
     }
 
+    private static ReportMetricsPayload parseReportMetricsPayload(String requestBody) {
+        JsonNode root;
+        try {
+            root = OBJECT_MAPPER.readTree(requestBody);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Invalid request body");
+        }
+        if (root == null || !root.isObject()) {
+            throw new IllegalArgumentException("Invalid request body");
+        }
+
+        JsonNode reportTypeNode = root.get("report-type");
+        if (reportTypeNode == null || !reportTypeNode.isTextual() || reportTypeNode.asText("").isEmpty()) {
+            throw new IllegalArgumentException("Missing or invalid report-type");
+        }
+        String reportType = reportTypeNode.asText();
+        if (!"scan-report".equals(reportType) && !"commit-report".equals(reportType)) {
+            throw new IllegalArgumentException("Unsupported report-type");
+        }
+
+        JsonNode reportNode = root.get("report");
+        if (reportNode == null || !reportNode.isObject()) {
+            throw new IllegalArgumentException("Missing or invalid report");
+        }
+
+        try {
+            return new ReportMetricsPayload(reportType, OBJECT_MAPPER.writeValueAsString(root));
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Invalid request body");
+        }
+    }
+
+    private record ReportMetricsPayload(String reportType, String normalizedPayloadJson) {}
+
     private static class NotFoundHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
@@ -2133,18 +2219,25 @@ public class IcebergRestServer {
 
     private static void sendIcebergError(HttpExchange exchange, int statusCode, String message, String method, String path) throws IOException {
         String escapedMessage = escapeJson(message);
-        String type;
-        if (statusCode >= 500) {
-            type = "ServerErrorException";
-        } else if (statusCode == 404) {
-            type = "NoSuchEntityException";
-        } else if (statusCode == 409) {
-            type = "CommitFailedException";
-        } else {
-            type = "BadRequestException";
-        }
+        String type = errorTypeForStatus(statusCode);
         String body = "{\"error\":{\"message\":\"" + escapedMessage + "\",\"type\":\"" + type + "\",\"code\":" + statusCode + "}}";
         sendJson(exchange, statusCode, body, method, path);
+    }
+
+    private static String errorTypeForStatus(int statusCode) {
+        if (statusCode >= 500) {
+            return "ServerErrorException";
+        }
+        if (statusCode == 404) {
+            return "NoSuchEntityException";
+        }
+        if (statusCode == 409) {
+            return "CommitFailedException";
+        }
+        if (statusCode == 405) {
+            return "RESTException";
+        }
+        return "BadRequestException";
     }
 
     private static void sendJson(HttpExchange exchange, int statusCode, String body, String method, String path) throws IOException {

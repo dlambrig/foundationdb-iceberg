@@ -65,7 +65,7 @@ docker cp fdb:/var/fdb/fdb.cluster ./fdb.cluster
   - duplicate table create rejected with conflict (`409`)
   - strict validation for unknown commit requirement types and malformed `assert-ref-snapshot-id` payloads
   - table location updates via commit action (`set-location`)
-  - metrics endpoint stub used by Trino
+  - metrics report ingestion endpoint (`POST /v1/namespaces/{ns}/tables/{table}/metrics`) with payload validation + persistence
 - Error responses are formatted for Iceberg REST clients.
 - Integration harness can start server + Trino, run SQL, and validate expected results.
 

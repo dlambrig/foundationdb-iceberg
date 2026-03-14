@@ -12,6 +12,7 @@ import java.net.URI;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -21,12 +22,14 @@ class IcebergRestServerHttpTest {
 
     private HttpServer server;
     private String baseUrl;
+    private InMemoryMetricsStore metricsStore;
 
     @BeforeEach
     void setUp() throws Exception {
         NamespaceStore ns = new InMemoryNamespaceStore(List.of("sales"));
         TableStore tables = new InMemoryTableStore();
-        server = IcebergRestServer.startServer(0, ns, tables);
+        metricsStore = new InMemoryMetricsStore();
+        server = IcebergRestServer.startServer(0, ns, tables, new InMemoryViewStore(), metricsStore);
         baseUrl = "http://localhost:" + server.getAddress().getPort();
     }
 
@@ -74,6 +77,74 @@ class IcebergRestServerHttpTest {
         assertEquals(404, error.path("code").asInt());
         assertEquals("NoSuchEntityException", error.path("type").asText());
         assertTrue(error.path("message").asText().contains("Namespace not found"));
+    }
+
+    @Test
+    void errorEnvelopeMatrixAcrossEndpointsIsConsistent() throws Exception {
+        assertErrorEnvelope("POST", "/v1/config", "{}", 405, "RESTException", "Method Not Allowed");
+
+        assertErrorEnvelope("POST", "/v1/namespaces", "{\"namespace\":[],\"properties\":{}}", 400, "BadRequestException", "Invalid namespace");
+        assertErrorEnvelope("POST", "/v1/namespaces", "{\"namespace\":[\"n1\"],\"properties\":\"bad\"}", 400, "BadRequestException", "Invalid properties");
+
+        assertErrorEnvelope("GET", "/v1/does-not-exist", null, 404, "NoSuchEntityException", "Not Found");
+
+        assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}").statusCode);
+
+        assertErrorEnvelope("POST", "/v1/namespaces/analytics/properties", "{\"updates\":{},\"removals\":\"bad\"}", 400, "BadRequestException", "Invalid properties update payload");
+        assertErrorEnvelope("POST", "/v1/tables/rename", "{\"source\":{},\"destination\":{}}", 400, "BadRequestException", "Invalid rename payload");
+        assertErrorEnvelope("POST", "/v1/tables/rename", "{\"source\":{\"namespace\":[\"analytics\"],\"name\":\"a\"},\"destination\":{\"namespace\":[\"missing\"],\"name\":\"b\"}}", 404, "NoSuchEntityException", "Namespace not found");
+
+        String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables", tableBody).statusCode);
+
+        assertErrorEnvelope("POST", "/v1/namespaces/analytics/tables/orders", "{\"updates\":[{\"action\":\"unknown\"}]}", 400, "BadRequestException", "Unsupported update action");
+        assertErrorEnvelope("POST", "/v1/namespaces/analytics/tables/orders", "{\"requirements\":[{\"type\":\"assert-create\"}],\"updates\":[]}", 409, "CommitFailedException", "assert-create failed");
+        assertErrorEnvelope("GET", "/v1/namespaces/analytics/tables/missing", null, 404, "NoSuchEntityException", "Table not found");
+
+        String viewBody = """
+                {"name":"orders_v","view-version":{"version-id":1,"timestamp-ms":1700000000000,"schema-id":0},"schema":{"type":"struct","schema-id":0,"fields":[]}}
+                """;
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/views", viewBody).statusCode);
+        assertErrorEnvelope("POST", "/v1/namespaces/analytics/views", "{\"name\":\"bad\"}", 400, "BadRequestException", "Missing or invalid view-version");
+        assertErrorEnvelope("POST", "/v1/namespaces/analytics/views/orders_v", "{\"updates\":[{\"action\":\"set-current-view-version\",\"version-id\":999}]}", 400, "BadRequestException", "unknown version-id");
+        assertErrorEnvelope("GET", "/v1/namespaces/analytics/views/missing", null, 404, "NoSuchEntityException", "View not found");
+
+        assertErrorEnvelope("GET", "/v1/namespaces?page-size=0", null, 400, "BadRequestException", "Invalid page-size");
+        assertErrorEnvelope("GET", "/v1/namespaces?page-token=missing", null, 400, "BadRequestException", "Invalid page-token");
+    }
+
+    @Test
+    void internalServerErrorsUseConsistentEnvelope() throws Exception {
+        server.stop(0);
+        AtomicBoolean firstListCall = new AtomicBoolean(true);
+        NamespaceStore brokenNs = new NamespaceStore() {
+            @Override
+            public List<String> listNamespaces() {
+                if (firstListCall.getAndSet(false)) {
+                    return List.of();
+                }
+                throw new RuntimeException("boom");
+            }
+
+            @Override
+            public void createNamespace(String namespace) {
+                throw new RuntimeException("boom");
+            }
+
+            @Override
+            public boolean deleteNamespace(String namespace) {
+                throw new RuntimeException("boom");
+            }
+        };
+        server = IcebergRestServer.startServer(0, brokenNs, new InMemoryTableStore(), new InMemoryViewStore());
+        baseUrl = "http://localhost:" + server.getAddress().getPort();
+
+        HttpResponse response = request("GET", "/v1/namespaces", null);
+        assertEquals(500, response.statusCode);
+        JsonNode error = MAPPER.readTree(response.body).path("error");
+        assertEquals(500, error.path("code").asInt());
+        assertEquals("ServerErrorException", error.path("type").asText());
+        assertTrue(error.path("message").asText().contains("Internal Server Error"));
     }
 
     @Test
@@ -287,6 +358,38 @@ class IcebergRestServerHttpTest {
                 "/v1/namespaces/analytics/tables/orders",
                 "{\"updates\":[{\"action\":\"remove-encryption-key\",\"key-ids\":\"bad\"}]}");
         assertEquals(400, malformedRemoveEncryptionKey.statusCode);
+    }
+
+    @Test
+    void reportMetricsValidatesPayloadAndPersistsReports() throws Exception {
+        request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
+        String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables", tableBody).statusCode);
+
+        String commitReport = """
+                {
+                  "report-type":"commit-report",
+                  "report":{"table-name":"orders","snapshot-id":123}
+                }
+                """;
+        HttpResponse ok = request("POST", "/v1/namespaces/analytics/tables/orders/metrics", commitReport);
+        assertEquals(204, ok.statusCode);
+        List<MetricsStore.MetricRecord> records = metricsStore.listTableMetrics("analytics", "orders");
+        assertEquals(1, records.size());
+        assertEquals("commit-report", records.get(0).reportType());
+
+        HttpResponse missingTable = request("POST", "/v1/namespaces/analytics/tables/missing/metrics", commitReport);
+        assertEquals(404, missingTable.statusCode);
+        assertEquals("NoSuchEntityException", MAPPER.readTree(missingTable.body).path("error").path("type").asText());
+
+        HttpResponse badJson = request("POST", "/v1/namespaces/analytics/tables/orders/metrics", "{\"report-type\"");
+        assertEquals(400, badJson.statusCode);
+
+        HttpResponse badType = request("POST", "/v1/namespaces/analytics/tables/orders/metrics", "{\"report-type\":\"x\",\"report\":{}}");
+        assertEquals(400, badType.statusCode);
+
+        HttpResponse missingReport = request("POST", "/v1/namespaces/analytics/tables/orders/metrics", "{\"report-type\":\"scan-report\"}");
+        assertEquals(400, missingReport.statusCode);
     }
 
     @Test
@@ -675,6 +778,15 @@ class IcebergRestServerHttpTest {
         }
         conn.disconnect();
         return new HttpResponse(code, responseBody);
+    }
+
+    private void assertErrorEnvelope(String method, String path, String body, int expectedCode, String expectedType, String messageContains) throws Exception {
+        HttpResponse response = request(method, path, body);
+        assertEquals(expectedCode, response.statusCode);
+        JsonNode error = MAPPER.readTree(response.body).path("error");
+        assertEquals(expectedCode, error.path("code").asInt());
+        assertEquals(expectedType, error.path("type").asText());
+        assertTrue(error.path("message").asText().contains(messageContains));
     }
 
     private record HttpResponse(int statusCode, String body) {}
