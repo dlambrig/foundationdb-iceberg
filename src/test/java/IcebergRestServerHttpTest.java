@@ -22,12 +22,14 @@ class IcebergRestServerHttpTest {
 
     private HttpServer server;
     private String baseUrl;
+    private InMemoryMetricsStore metricsStore;
 
     @BeforeEach
     void setUp() throws Exception {
         NamespaceStore ns = new InMemoryNamespaceStore(List.of("sales"));
         TableStore tables = new InMemoryTableStore();
-        server = IcebergRestServer.startServer(0, ns, tables);
+        metricsStore = new InMemoryMetricsStore();
+        server = IcebergRestServer.startServer(0, ns, tables, new InMemoryViewStore(), metricsStore);
         baseUrl = "http://localhost:" + server.getAddress().getPort();
     }
 
@@ -356,6 +358,38 @@ class IcebergRestServerHttpTest {
                 "/v1/namespaces/analytics/tables/orders",
                 "{\"updates\":[{\"action\":\"remove-encryption-key\",\"key-ids\":\"bad\"}]}");
         assertEquals(400, malformedRemoveEncryptionKey.statusCode);
+    }
+
+    @Test
+    void reportMetricsValidatesPayloadAndPersistsReports() throws Exception {
+        request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
+        String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables", tableBody).statusCode);
+
+        String commitReport = """
+                {
+                  "report-type":"commit-report",
+                  "report":{"table-name":"orders","snapshot-id":123}
+                }
+                """;
+        HttpResponse ok = request("POST", "/v1/namespaces/analytics/tables/orders/metrics", commitReport);
+        assertEquals(204, ok.statusCode);
+        List<MetricsStore.MetricRecord> records = metricsStore.listTableMetrics("analytics", "orders");
+        assertEquals(1, records.size());
+        assertEquals("commit-report", records.get(0).reportType());
+
+        HttpResponse missingTable = request("POST", "/v1/namespaces/analytics/tables/missing/metrics", commitReport);
+        assertEquals(404, missingTable.statusCode);
+        assertEquals("NoSuchEntityException", MAPPER.readTree(missingTable.body).path("error").path("type").asText());
+
+        HttpResponse badJson = request("POST", "/v1/namespaces/analytics/tables/orders/metrics", "{\"report-type\"");
+        assertEquals(400, badJson.statusCode);
+
+        HttpResponse badType = request("POST", "/v1/namespaces/analytics/tables/orders/metrics", "{\"report-type\":\"x\",\"report\":{}}");
+        assertEquals(400, badType.statusCode);
+
+        HttpResponse missingReport = request("POST", "/v1/namespaces/analytics/tables/orders/metrics", "{\"report-type\":\"scan-report\"}");
+        assertEquals(400, missingReport.statusCode);
     }
 
     @Test
