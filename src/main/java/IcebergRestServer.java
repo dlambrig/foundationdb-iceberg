@@ -229,6 +229,20 @@ public class IcebergRestServer {
         if (schemaIdNode == null || !schemaIdNode.canConvertToInt()) {
             throw new IllegalArgumentException("schema requires integer schema-id");
         }
+        int schemaId = schemaIdNode.asInt(Integer.MIN_VALUE);
+
+        JsonNode viewVersionSchemaIdNode = viewVersionNode.get("schema-id");
+        if (viewVersionSchemaIdNode == null || !viewVersionSchemaIdNode.canConvertToInt()) {
+            throw new IllegalArgumentException("view-version requires integer schema-id");
+        }
+        if (viewVersionSchemaIdNode.asInt(Integer.MIN_VALUE) != schemaId) {
+            throw new IllegalArgumentException("view-version schema-id must match schema schema-id");
+        }
+
+        JsonNode timestampNode = viewVersionNode.get("timestamp-ms");
+        if (timestampNode == null || !timestampNode.canConvertToLong()) {
+            throw new IllegalArgumentException("view-version requires integer timestamp-ms");
+        }
 
         String viewUuid = UUID.randomUUID().toString();
         String location = request.path("location").asText("");
@@ -256,7 +270,10 @@ public class IcebergRestServer {
 
         ObjectNode properties = metadata.putObject("properties");
         JsonNode propertiesNode = request.get("properties");
-        if (propertiesNode != null && propertiesNode.isObject()) {
+        if (propertiesNode != null) {
+            if (!propertiesNode.isObject()) {
+                throw new IllegalArgumentException("Invalid properties");
+            }
             propertiesNode.fields().forEachRemaining(entry -> properties.put(entry.getKey(), entry.getValue().asText("")));
         }
         metadata.putArray("metadata-log");
@@ -1870,6 +1887,10 @@ public class IcebergRestServer {
 
             Map<String, String> properties = new LinkedHashMap<>();
             JsonNode props = root.path("properties");
+            if (!props.isMissingNode() && !props.isObject()) {
+                sendIcebergError(exchange, 400, "Invalid properties", method, path);
+                return;
+            }
             if (props.isObject()) {
                 props.fields().forEachRemaining(entry -> properties.put(entry.getKey(), entry.getValue().asText("")));
             }
@@ -2133,18 +2154,25 @@ public class IcebergRestServer {
 
     private static void sendIcebergError(HttpExchange exchange, int statusCode, String message, String method, String path) throws IOException {
         String escapedMessage = escapeJson(message);
-        String type;
-        if (statusCode >= 500) {
-            type = "ServerErrorException";
-        } else if (statusCode == 404) {
-            type = "NoSuchEntityException";
-        } else if (statusCode == 409) {
-            type = "CommitFailedException";
-        } else {
-            type = "BadRequestException";
-        }
+        String type = errorTypeForStatus(statusCode);
         String body = "{\"error\":{\"message\":\"" + escapedMessage + "\",\"type\":\"" + type + "\",\"code\":" + statusCode + "}}";
         sendJson(exchange, statusCode, body, method, path);
+    }
+
+    private static String errorTypeForStatus(int statusCode) {
+        if (statusCode >= 500) {
+            return "ServerErrorException";
+        }
+        if (statusCode == 404) {
+            return "NoSuchEntityException";
+        }
+        if (statusCode == 409) {
+            return "CommitFailedException";
+        }
+        if (statusCode == 405) {
+            return "RESTException";
+        }
+        return "BadRequestException";
     }
 
     private static void sendJson(HttpExchange exchange, int statusCode, String body, String method, String path) throws IOException {
