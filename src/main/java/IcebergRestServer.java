@@ -19,11 +19,14 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.LinkedHashMap;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 
@@ -1065,19 +1068,19 @@ public class IcebergRestServer {
             if (!requirement.isObject()) {
                 throw new IllegalArgumentException("Invalid requirement entry");
             }
-            String type = requirement.path("type").asText("");
-            if (type.isEmpty()) {
-                throw new IllegalArgumentException("Requirement type is missing");
-            }
+            String type = requireRequirementType(requirement);
             if ("assert-create".equals(type)) {
+                validateRequirementFields(requirement, type, Set.of());
                 throw new IllegalStateException("assert-create failed");
             } else if ("assert-table-uuid".equals(type)) {
+                validateRequirementFields(requirement, type, Set.of("uuid"));
                 String expected = requireUuidRequirement(requirement, "uuid", "assert-table-uuid");
                 String actual = metadata.path("table-uuid").asText("");
                 if (!expected.equals(actual)) {
                     throw new IllegalStateException("assert-table-uuid failed");
                 }
             } else if ("assert-ref-snapshot-id".equals(type)) {
+                validateRequirementFields(requirement, type, Set.of("ref", "snapshot-id"));
                 JsonNode refNode = requirement.get("ref");
                 if (refNode == null || !refNode.isTextual() || refNode.asText("").isEmpty()) {
                     throw new IllegalArgumentException("assert-ref-snapshot-id requires non-empty ref");
@@ -1098,36 +1101,42 @@ public class IcebergRestServer {
                     throw new IllegalStateException("assert-ref-snapshot-id failed");
                 }
             } else if ("assert-current-schema-id".equals(type)) {
+                validateRequirementFields(requirement, type, Set.of("current-schema-id"));
                 int expected = requireIntRequirement(requirement, "current-schema-id", "assert-current-schema-id");
                 int actual = metadata.path("current-schema-id").asInt(Integer.MIN_VALUE);
                 if (expected == Integer.MIN_VALUE || expected != actual) {
                     throw new IllegalStateException("assert-current-schema-id failed");
                 }
             } else if ("assert-last-assigned-field-id".equals(type)) {
+                validateRequirementFields(requirement, type, Set.of("last-assigned-field-id"));
                 long expected = requireLongRequirement(requirement, "last-assigned-field-id", "assert-last-assigned-field-id");
                 long actual = metadata.path("last-column-id").asLong(Long.MIN_VALUE);
                 if (expected == Long.MIN_VALUE || expected != actual) {
                     throw new IllegalStateException("assert-last-assigned-field-id failed");
                 }
             } else if ("assert-last-assigned-partition-id".equals(type)) {
+                validateRequirementFields(requirement, type, Set.of("last-assigned-partition-id"));
                 long expected = requireLongRequirement(requirement, "last-assigned-partition-id", "assert-last-assigned-partition-id");
                 long actual = metadata.path("last-partition-id").asLong(Long.MIN_VALUE);
                 if (expected == Long.MIN_VALUE || expected != actual) {
                     throw new IllegalStateException("assert-last-assigned-partition-id failed");
                 }
             } else if ("assert-default-spec-id".equals(type)) {
+                validateRequirementFields(requirement, type, Set.of("default-spec-id"));
                 long expected = requireLongRequirement(requirement, "default-spec-id", "assert-default-spec-id");
                 long actual = metadata.path("default-spec-id").asLong(Long.MIN_VALUE);
                 if (expected == Long.MIN_VALUE || expected != actual) {
                     throw new IllegalStateException("assert-default-spec-id failed");
                 }
             } else if ("assert-default-sort-order-id".equals(type)) {
+                validateRequirementFields(requirement, type, Set.of("default-sort-order-id"));
                 long expected = requireLongRequirement(requirement, "default-sort-order-id", "assert-default-sort-order-id");
                 long actual = metadata.path("default-sort-order-id").asLong(Long.MIN_VALUE);
                 if (expected == Long.MIN_VALUE || expected != actual) {
                     throw new IllegalStateException("assert-default-sort-order-id failed");
                 }
             } else if ("assert-view-uuid".equals(type)) {
+                validateRequirementFields(requirement, type, Set.of("uuid"));
                 String expected = requireUuidRequirement(requirement, "uuid", "assert-view-uuid");
                 String actual = metadata.path("view-uuid").asText("");
                 if (!expected.equals(actual)) {
@@ -1151,13 +1160,12 @@ public class IcebergRestServer {
             if (!requirement.isObject()) {
                 throw new IllegalArgumentException("Invalid requirement entry");
             }
-            String type = requirement.path("type").asText("");
-            if (type.isEmpty()) {
-                throw new IllegalArgumentException("Requirement type is missing");
-            }
+            String type = requireRequirementType(requirement);
             if ("assert-create".equals(type)) {
+                validateRequirementFields(requirement, type, Set.of());
                 throw new IllegalStateException("assert-create failed");
             } else if ("assert-view-uuid".equals(type)) {
+                validateRequirementFields(requirement, type, Set.of("uuid"));
                 String expected = requireUuidRequirement(requirement, "uuid", "assert-view-uuid");
                 String actual = metadata.path("view-uuid").asText("");
                 if (!expected.equals(actual)) {
@@ -1165,6 +1173,26 @@ public class IcebergRestServer {
                 }
             } else {
                 throw new IllegalArgumentException("Unsupported requirement type: " + type);
+            }
+        }
+    }
+
+    private static String requireRequirementType(JsonNode requirement) {
+        JsonNode typeNode = requirement.get("type");
+        if (typeNode == null || !typeNode.isTextual() || typeNode.asText("").isEmpty()) {
+            throw new IllegalArgumentException("Requirement type is missing");
+        }
+        return typeNode.asText();
+    }
+
+    private static void validateRequirementFields(JsonNode requirement, String requirementType, Set<String> allowedFields) {
+        Set<String> allowed = new HashSet<>(allowedFields);
+        allowed.add("type");
+        Iterator<String> fieldNames = requirement.fieldNames();
+        while (fieldNames.hasNext()) {
+            String fieldName = fieldNames.next();
+            if (!allowed.contains(fieldName)) {
+                throw new IllegalArgumentException(requirementType + " has unsupported field: " + fieldName);
             }
         }
     }

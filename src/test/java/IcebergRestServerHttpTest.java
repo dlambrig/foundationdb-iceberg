@@ -451,11 +451,29 @@ class IcebergRestServerHttpTest {
                 "{\"requirements\":[{\"type\":\"assert-unknown\",\"value\":1}],\"updates\":[]}");
         assertEquals(400, unknownRequirement.statusCode);
 
+        HttpResponse nonStringRequirementType = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":123}],\"updates\":[]}");
+        assertEquals(400, nonStringRequirementType.statusCode);
+
+        HttpResponse assertCreateWithUnexpectedField = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":\"assert-create\",\"unexpected\":true}],\"updates\":[]}");
+        assertEquals(400, assertCreateWithUnexpectedField.statusCode);
+
         HttpResponse malformedAssertRef = request(
                 "POST",
                 "/v1/namespaces/analytics/tables/orders",
                 "{\"requirements\":[{\"type\":\"assert-ref-snapshot-id\",\"snapshot-id\":null}],\"updates\":[]}");
         assertEquals(400, malformedAssertRef.statusCode);
+
+        HttpResponse malformedAssertRefExtraField = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":\"assert-ref-snapshot-id\",\"ref\":\"main\",\"snapshot-id\":null,\"unexpected\":\"x\"}],\"updates\":[]}");
+        assertEquals(400, malformedAssertRefExtraField.statusCode);
 
         HttpResponse assertCreate = request(
                 "POST",
