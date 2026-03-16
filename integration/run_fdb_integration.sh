@@ -153,6 +153,20 @@ extract_json_field() {
   echo "${json}" | sed -nE "s/.*\"${field}\":\"([^\"]+)\".*/\\1/p"
 }
 
+assert_body_contains() {
+  local name="$1"
+  local response="$2"
+  local pattern="$3"
+  local body
+  body="$(http_body "${response}")"
+  if ! grep -Eq "${pattern}" <<<"${body}"; then
+    echo "Body assertion failed for ${name}. Expected pattern: ${pattern}" >&2
+    echo "Body:" >&2
+    echo "${body}" >&2
+    exit 1
+  fi
+}
+
 assert_http_status() {
   local name="$1"
   local response="$2"
@@ -203,8 +217,9 @@ start_server
 
 NS="fdb_it_${RUN_ID}"
 TABLE="orders_${RUN_ID}"
+VIEW="orders_view_${RUN_ID}"
 
-echo "==> Restart/reload check"
+echo "==> Bootstrap namespace/table"
 CREATE_NS="$(run_http_request "POST" "http://localhost:8181/v1/namespaces" "{\"namespace\":[\"${NS}\"],\"properties\":{}}")"
 assert_http_status "create namespace" "${CREATE_NS}" "200"
 
@@ -218,49 +233,142 @@ if [[ -z "${METADATA_BEFORE}" ]]; then
   exit 1
 fi
 
-echo "Stopping server for reload check..."
-stop_server
-require_port_free 8181 "Server"
+echo "==> Metrics endpoint check"
+METRICS_PAYLOAD='{"report-type":"commit-report","report":{"table-name":"'"${TABLE}"'","snapshot-id":123}}'
+METRICS_RESP="$(run_http_request "POST" "http://localhost:8181/v1/namespaces/${NS}/tables/${TABLE}/metrics" "${METRICS_PAYLOAD}")"
+assert_http_status "report metrics pre-restart" "${METRICS_RESP}" "204"
 
-echo "Restarting server..."
-start_server
-
-GET_TABLE_AFTER="$(run_http_request "GET" "http://localhost:8181/v1/namespaces/${NS}/tables/${TABLE}")"
-assert_http_status "get table after restart" "${GET_TABLE_AFTER}" "200"
-METADATA_AFTER="$(extract_json_field "$(http_body "${GET_TABLE_AFTER}")" "metadata-location")"
-if [[ "${METADATA_BEFORE}" != "${METADATA_AFTER}" ]]; then
-  echo "Reload check failed: metadata-location changed across restart" >&2
-  echo "Before: ${METADATA_BEFORE}" >&2
-  echo "After:  ${METADATA_AFTER}" >&2
+echo "==> View bootstrap"
+CREATE_VIEW_PAYLOAD='{"name":"'"${VIEW}"'","view-version":{"version-id":1,"timestamp-ms":1773000000100,"schema-id":0},"schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"long"}]},"properties":{"owner":"integration"}}'
+CREATE_VIEW="$(run_http_request "POST" "http://localhost:8181/v1/namespaces/${NS}/views" "${CREATE_VIEW_PAYLOAD}")"
+assert_http_status "create view" "${CREATE_VIEW}" "200"
+VIEW_METADATA_BEFORE="$(extract_json_field "$(http_body "${CREATE_VIEW}")" "metadata-location")"
+if [[ -z "${VIEW_METADATA_BEFORE}" ]]; then
+  echo "Failed to extract view metadata-location before restart" >&2
   exit 1
 fi
 
-echo "==> Concurrent writer conflict check"
-COMMIT1_PAYLOAD='{"requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null}],"updates":[{"action":"add-snapshot","snapshot":{"sequence-number":1,"snapshot-id":700001,"timestamp-ms":1773000000001,"schema-id":0}},{"action":"set-snapshot-ref","ref-name":"main","snapshot-id":700001,"type":"branch"}]}'
+echo "==> Pagination checks"
+for child in a b c; do
+  CHILD_NS_PAYLOAD="{\"namespace\":[\"${NS}\",\"${child}\"],\"properties\":{}}"
+  CHILD_NS_RESP="$(run_http_request "POST" "http://localhost:8181/v1/namespaces" "${CHILD_NS_PAYLOAD}")"
+  assert_http_status "create child namespace ${child}" "${CHILD_NS_RESP}" "200"
+done
 
-R1_FILE="$(mktemp)"
-R2_FILE="$(mktemp)"
-
-(
-  run_http_request "POST" "http://localhost:8181/v1/namespaces/${NS}/tables/${TABLE}" "${COMMIT1_PAYLOAD}" >"${R1_FILE}"
-) &
-PID1=$!
-(
-  run_http_request "POST" "http://localhost:8181/v1/namespaces/${NS}/tables/${TABLE}" "${COMMIT1_PAYLOAD}" >"${R2_FILE}"
-) &
-PID2=$!
-
-wait "${PID1}"
-wait "${PID2}"
-
-STATUS1="$(http_status "$(cat "${R1_FILE}")")"
-STATUS2="$(http_status "$(cat "${R2_FILE}")")"
-rm -f "${R1_FILE}" "${R2_FILE}"
-
-if ! { [[ "${STATUS1}" == "200" && "${STATUS2}" == "409" ]] || [[ "${STATUS1}" == "409" && "${STATUS2}" == "200" ]]; }; then
-  echo "Concurrent writer check failed: expected one 200 and one 409, got ${STATUS1} and ${STATUS2}" >&2
+NS_PAGE1="$(run_http_request "GET" "http://localhost:8181/v1/namespaces?parent=${NS}&page-size=2")"
+assert_http_status "namespace pagination page1" "${NS_PAGE1}" "200"
+assert_body_contains "namespace pagination page1 token" "${NS_PAGE1}" '"next-page-token"'
+NS_TOKEN="$(extract_json_field "$(http_body "${NS_PAGE1}")" "next-page-token")"
+if [[ -z "${NS_TOKEN}" ]]; then
+  echo "Failed to extract namespace next-page-token" >&2
   exit 1
 fi
+NS_PAGE2="$(run_http_request "GET" "http://localhost:8181/v1/namespaces?parent=${NS}&page-size=2&page-token=${NS_TOKEN}")"
+assert_http_status "namespace pagination page2" "${NS_PAGE2}" "200"
+assert_body_contains "namespace pagination page2 contains c" "${NS_PAGE2}" "\"${NS}\",\"c\""
+
+for t in t1 t2 t3; do
+  TABLE_PAYLOAD="{\"name\":\"${t}\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}"
+  TABLE_RESP="$(run_http_request "POST" "http://localhost:8181/v1/namespaces/${NS}/tables" "${TABLE_PAYLOAD}")"
+  assert_http_status "create table ${t}" "${TABLE_RESP}" "200"
+done
+TABLE_PAGE1="$(run_http_request "GET" "http://localhost:8181/v1/namespaces/${NS}/tables?page-size=2")"
+assert_http_status "table pagination page1" "${TABLE_PAGE1}" "200"
+assert_body_contains "table pagination page1 token" "${TABLE_PAGE1}" '"next-page-token"'
+TABLE_TOKEN="$(extract_json_field "$(http_body "${TABLE_PAGE1}")" "next-page-token")"
+if [[ -z "${TABLE_TOKEN}" ]]; then
+  echo "Failed to extract table next-page-token" >&2
+  exit 1
+fi
+TABLE_PAGE2="$(run_http_request "GET" "http://localhost:8181/v1/namespaces/${NS}/tables?page-size=2&page-token=${TABLE_TOKEN}")"
+assert_http_status "table pagination page2" "${TABLE_PAGE2}" "200"
+assert_body_contains "table pagination page2" "${TABLE_PAGE2}" '"identifiers"'
+
+for v in v1 v2 v3; do
+  VIEW_PAYLOAD='{"name":"'"${v}"'","view-version":{"version-id":1,"timestamp-ms":1773000000200,"schema-id":0},"schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"long"}]}}'
+  VIEW_RESP="$(run_http_request "POST" "http://localhost:8181/v1/namespaces/${NS}/views" "${VIEW_PAYLOAD}")"
+  assert_http_status "create view ${v}" "${VIEW_RESP}" "200"
+done
+VIEW_PAGE1="$(run_http_request "GET" "http://localhost:8181/v1/namespaces/${NS}/views?page-size=2")"
+assert_http_status "view pagination page1" "${VIEW_PAGE1}" "200"
+assert_body_contains "view pagination page1 token" "${VIEW_PAGE1}" '"next-page-token"'
+VIEW_TOKEN="$(extract_json_field "$(http_body "${VIEW_PAGE1}")" "next-page-token")"
+if [[ -z "${VIEW_TOKEN}" ]]; then
+  echo "Failed to extract view next-page-token" >&2
+  exit 1
+fi
+VIEW_PAGE2="$(run_http_request "GET" "http://localhost:8181/v1/namespaces/${NS}/views?page-size=2&page-token=${VIEW_TOKEN}")"
+assert_http_status "view pagination page2" "${VIEW_PAGE2}" "200"
+assert_body_contains "view pagination page2" "${VIEW_PAGE2}" '"identifiers"'
+
+if [[ "${START_SERVER}" == "true" ]]; then
+  echo "==> Restart/reload checks (table, view, metrics path)"
+  echo "Stopping server for reload checks..."
+  stop_server
+  require_port_free 8181 "Server"
+
+  echo "Restarting server..."
+  start_server
+
+  GET_TABLE_AFTER="$(run_http_request "GET" "http://localhost:8181/v1/namespaces/${NS}/tables/${TABLE}")"
+  assert_http_status "get table after restart" "${GET_TABLE_AFTER}" "200"
+  METADATA_AFTER="$(extract_json_field "$(http_body "${GET_TABLE_AFTER}")" "metadata-location")"
+  if [[ "${METADATA_BEFORE}" != "${METADATA_AFTER}" ]]; then
+    echo "Reload check failed: table metadata-location changed across restart" >&2
+    echo "Before: ${METADATA_BEFORE}" >&2
+    echo "After:  ${METADATA_AFTER}" >&2
+    exit 1
+  fi
+
+  GET_VIEW_AFTER="$(run_http_request "GET" "http://localhost:8181/v1/namespaces/${NS}/views/${VIEW}")"
+  assert_http_status "get view after restart" "${GET_VIEW_AFTER}" "200"
+  VIEW_METADATA_AFTER="$(extract_json_field "$(http_body "${GET_VIEW_AFTER}")" "metadata-location")"
+  if [[ "${VIEW_METADATA_BEFORE}" != "${VIEW_METADATA_AFTER}" ]]; then
+    echo "Reload check failed: view metadata-location changed across restart" >&2
+    echo "Before: ${VIEW_METADATA_BEFORE}" >&2
+    echo "After:  ${VIEW_METADATA_AFTER}" >&2
+    exit 1
+  fi
+
+  METRICS_RESP_AFTER="$(run_http_request "POST" "http://localhost:8181/v1/namespaces/${NS}/tables/${TABLE}/metrics" "${METRICS_PAYLOAD}")"
+  assert_http_status "report metrics post-restart" "${METRICS_RESP_AFTER}" "204"
+else
+  echo "Skipping restart/reload checks because --no-start-server was set."
+fi
+
+echo "==> Repeated concurrent writer conflict checks"
+for i in 1 2 3 4 5; do
+  CW_TABLE="cw_${RUN_ID}_${i}"
+  CW_CREATE_PAYLOAD="{\"name\":\"${CW_TABLE}\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}"
+  CW_CREATE_RESP="$(run_http_request "POST" "http://localhost:8181/v1/namespaces/${NS}/tables" "${CW_CREATE_PAYLOAD}")"
+  assert_http_status "create concurrent table ${i}" "${CW_CREATE_RESP}" "200"
+
+  SNAP_ID=$((700000 + i))
+  COMMIT_PAYLOAD='{"requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null}],"updates":[{"action":"add-snapshot","snapshot":{"sequence-number":1,"snapshot-id":'"${SNAP_ID}"',"timestamp-ms":1773000000'"${i}"',"schema-id":0}},{"action":"set-snapshot-ref","ref-name":"main","snapshot-id":'"${SNAP_ID}"',"type":"branch"}]}'
+
+  R1_FILE="$(mktemp)"
+  R2_FILE="$(mktemp)"
+  (
+    run_http_request "POST" "http://localhost:8181/v1/namespaces/${NS}/tables/${CW_TABLE}" "${COMMIT_PAYLOAD}" >"${R1_FILE}"
+  ) &
+  PID1=$!
+  (
+    run_http_request "POST" "http://localhost:8181/v1/namespaces/${NS}/tables/${CW_TABLE}" "${COMMIT_PAYLOAD}" >"${R2_FILE}"
+  ) &
+  PID2=$!
+
+  wait "${PID1}"
+  wait "${PID2}"
+
+  STATUS1="$(http_status "$(cat "${R1_FILE}")")"
+  STATUS2="$(http_status "$(cat "${R2_FILE}")")"
+  rm -f "${R1_FILE}" "${R2_FILE}"
+
+  if ! { [[ "${STATUS1}" == "200" && "${STATUS2}" == "409" ]] || [[ "${STATUS1}" == "409" && "${STATUS2}" == "200" ]]; }; then
+    echo "Concurrent writer check iteration ${i} failed: expected one 200 and one 409, got ${STATUS1} and ${STATUS2}" >&2
+    exit 1
+  fi
+done
 
 echo
 echo "FDB integration checks passed."
