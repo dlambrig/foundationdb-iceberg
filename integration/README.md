@@ -51,8 +51,10 @@ cd /Users/dlambrig/apple/foundationdb-iceberg
 This script:
 - runs `trino_smoke.sh --fdb` (unless `--no-smoke` is used)
 - starts `IcebergRestServer` in FDB mode
-- validates restart/reload behavior (table still resolves after server restart)
-- validates concurrent writer conflict behavior (one commit succeeds, one conflicts)
+- validates metrics endpoint behavior pre/post restart
+- validates restart/reload behavior for both table and view metadata pointers
+- validates namespace/table/view pagination behavior via REST APIs
+- validates repeated concurrent writer conflict behavior (one commit succeeds, one conflicts per iteration)
 
 Options:
 
