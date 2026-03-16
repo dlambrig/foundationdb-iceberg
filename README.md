@@ -56,7 +56,7 @@ docker cp fdb:/var/fdb/fdb.cluster ./fdb.cluster
   - snapshot ref removal via commit action (`remove-snapshot-ref`, with `main` protected)
   - snapshot removal via commit action (`remove-snapshots`, with ref/parent safety checks)
   - table encryption key metadata updates via commit actions (`add-encryption-key`, `remove-encryption-key`)
-  - view commit updates (`add-view-version`, `set-current-view-version`)
+  - view commit updates (`add-view-version`, `set-current-view-version`, `remove-view-versions`)
   - `assert-create` requirement handling on commit path (conflicts on existing tables)
   - `assert-last-assigned-partition-id` requirement validation
   - `assert-default-spec-id` requirement validation

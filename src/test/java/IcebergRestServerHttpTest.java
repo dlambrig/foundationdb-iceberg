@@ -300,6 +300,53 @@ class IcebergRestServerHttpTest {
     }
 
     @Test
+    void viewRemoveVersionsCommitPathsReturnExpectedStatus() throws Exception {
+        request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
+
+        String createViewBody = """
+                {
+                  "name":"orders_view",
+                  "view-version":{"version-id":1,"timestamp-ms":1700000000000,"schema-id":0},
+                  "schema":{"type":"struct","schema-id":0,"fields":[]}
+                }
+                """;
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/views", createViewBody).statusCode);
+
+        String promoteV2 = """
+                {
+                  "updates":[
+                    {"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000}},
+                    {"action":"set-current-view-version","version-id":2}
+                  ]
+                }
+                """;
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/views/orders_view", promoteV2).statusCode);
+
+        String removeOld = """
+                {"updates":[{"action":"remove-view-versions","version-ids":[1]}]}
+                """;
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/views/orders_view", removeOld).statusCode);
+
+        String removeCurrent = """
+                {"updates":[{"action":"remove-view-versions","version-ids":[2]}]}
+                """;
+        HttpResponse conflict = request("POST", "/v1/namespaces/analytics/views/orders_view", removeCurrent);
+        assertEquals(409, conflict.statusCode);
+
+        String removeUnknown = """
+                {"updates":[{"action":"remove-view-versions","version-ids":[999]}]}
+                """;
+        HttpResponse badUnknown = request("POST", "/v1/namespaces/analytics/views/orders_view", removeUnknown);
+        assertEquals(400, badUnknown.statusCode);
+
+        String malformed = """
+                {"updates":[{"action":"remove-view-versions","version-ids":"bad"}]}
+                """;
+        HttpResponse badMalformed = request("POST", "/v1/namespaces/analytics/views/orders_view", malformed);
+        assertEquals(400, badMalformed.statusCode);
+    }
+
+    @Test
     void commitRejectsUnknownActionAndMissingFields() throws Exception {
         request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
         String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";

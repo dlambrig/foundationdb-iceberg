@@ -933,21 +933,28 @@ public class IcebergRestServer {
                 if (versionId == Integer.MIN_VALUE) {
                     throw new IllegalArgumentException("add-view-version requires integer version-id");
                 }
+                int schemaId = viewVersion.path("schema-id").asInt(Integer.MIN_VALUE);
+                if (schemaId == Integer.MIN_VALUE) {
+                    throw new IllegalArgumentException("add-view-version requires integer schema-id");
+                }
+                long timestampMs = viewVersion.path("timestamp-ms").asLong(Long.MIN_VALUE);
+                if (timestampMs == Long.MIN_VALUE) {
+                    throw new IllegalArgumentException("add-view-version requires integer timestamp-ms");
+                }
                 for (JsonNode version : versions) {
                     if (version.path("version-id").asInt(Integer.MIN_VALUE) == versionId) {
                         throw new IllegalArgumentException("add-view-version version-id already exists: " + versionId);
                     }
                 }
 
-                int schemaId = viewVersion.path("schema-id").asInt(Integer.MIN_VALUE);
-                if (schemaId != Integer.MIN_VALUE && !schemaIdExists(schemas, schemaId)) {
+                if (!schemaIdExists(schemas, schemaId)) {
                     throw new IllegalArgumentException("add-view-version references unknown schema-id: " + schemaId);
                 }
                 versions.add(viewVersion.deepCopy());
 
                 ObjectNode logEntry = OBJECT_MAPPER.createObjectNode();
                 logEntry.put("version-id", versionId);
-                logEntry.put("timestamp-ms", viewVersion.path("timestamp-ms").asLong(System.currentTimeMillis()));
+                logEntry.put("timestamp-ms", timestampMs);
                 versionLog.add(logEntry);
             } else if ("set-current-view-version".equals(action)) {
                 int versionId = updateNode.path("version-id").asInt(Integer.MIN_VALUE);
@@ -965,6 +972,30 @@ public class IcebergRestServer {
                     throw new IllegalArgumentException("set-current-view-version references unknown version-id: " + versionId);
                 }
                 metadata.put("current-version-id", versionId);
+            } else if ("remove-view-versions".equals(action)) {
+                JsonNode versionIdsNode = updateNode.get("version-ids");
+                if (versionIdsNode == null || !versionIdsNode.isArray()) {
+                    throw new IllegalArgumentException("remove-view-versions requires version-ids array");
+                }
+                List<Integer> removeVersionIds = new ArrayList<>();
+                for (JsonNode versionIdNode : versionIdsNode) {
+                    if (!versionIdNode.canConvertToInt()) {
+                        throw new IllegalArgumentException("remove-view-versions version-ids must be integers");
+                    }
+                    removeVersionIds.add(versionIdNode.asInt(Integer.MIN_VALUE));
+                }
+                List<Integer> existingVersionIds = collectIds(versions, "version-id");
+                for (int versionId : removeVersionIds) {
+                    if (!existingVersionIds.contains(versionId)) {
+                        throw new IllegalArgumentException("remove-view-versions references unknown version-id: " + versionId);
+                    }
+                }
+                int currentVersionId = metadata.path("current-version-id").asInt(Integer.MIN_VALUE);
+                if (removeVersionIds.contains(currentVersionId)) {
+                    throw new IllegalStateException("remove-view-versions cannot remove current-version-id: " + currentVersionId);
+                }
+                removeEntriesByIntId(versions, "version-id", removeVersionIds);
+                removeEntriesByIntId(versionLog, "version-id", removeVersionIds);
             } else if ("set-properties".equals(action)) {
                 JsonNode updates = updateNode.get("updates");
                 if (updates == null || !updates.isObject()) {

@@ -1086,6 +1086,78 @@ class IcebergRestServerLogicTest {
                 IllegalArgumentException.class,
                 () -> IcebergRestServer.applyCommitToViewResponseJson(base, badAddVersion));
         assertTrue(ex2.getMessage().contains("requires integer version-id"));
+
+        String missingSchemaId = """
+                {"updates":[{"action":"add-view-version","view-version":{"version-id":2,"timestamp-ms":1700000001000}}]}
+                """;
+        IllegalArgumentException ex3 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToViewResponseJson(base, missingSchemaId));
+        assertTrue(ex3.getMessage().contains("requires integer schema-id"));
+
+        String missingTimestamp = """
+                {"updates":[{"action":"add-view-version","view-version":{"version-id":2,"schema-id":0}}]}
+                """;
+        IllegalArgumentException ex4 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToViewResponseJson(base, missingTimestamp));
+        assertTrue(ex4.getMessage().contains("requires integer timestamp-ms"));
+    }
+
+    @Test
+    void removeViewVersionsEnforcesCurrentAndUnknownProtections() throws Exception {
+        String base = IcebergRestServer.buildLoadViewResponseJson(
+                "sales",
+                """
+                {
+                  "name":"orders_view",
+                  "view-version":{"version-id":1,"timestamp-ms":1700000000000,"schema-id":0},
+                  "schema":{"type":"struct","schema-id":0,"fields":[]}
+                }
+                """);
+        String withVersion2 = IcebergRestServer.applyCommitToViewResponseJson(
+                base,
+                """
+                {
+                  "updates":[
+                    {"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000}},
+                    {"action":"set-current-view-version","version-id":2}
+                  ]
+                }
+                """);
+
+        String removeOld = """
+                {"updates":[{"action":"remove-view-versions","version-ids":[1]}]}
+                """;
+        String afterRemoveOld = IcebergRestServer.applyCommitToViewResponseJson(withVersion2, removeOld);
+        JsonNode metadata = MAPPER.readTree(afterRemoveOld).path("metadata");
+        assertEquals(1, metadata.path("versions").size());
+        assertEquals(1, metadata.path("version-log").size());
+        assertEquals(2, metadata.path("current-version-id").asInt());
+
+        String removeCurrent = """
+                {"updates":[{"action":"remove-view-versions","version-ids":[2]}]}
+                """;
+        IllegalStateException ex1 = assertThrows(
+                IllegalStateException.class,
+                () -> IcebergRestServer.applyCommitToViewResponseJson(afterRemoveOld, removeCurrent));
+        assertTrue(ex1.getMessage().contains("cannot remove current-version-id"));
+
+        String removeUnknown = """
+                {"updates":[{"action":"remove-view-versions","version-ids":[999]}]}
+                """;
+        IllegalArgumentException ex2 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToViewResponseJson(afterRemoveOld, removeUnknown));
+        assertTrue(ex2.getMessage().contains("unknown version-id"));
+
+        String malformed = """
+                {"updates":[{"action":"remove-view-versions","version-ids":"bad"}]}
+                """;
+        IllegalArgumentException ex3 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToViewResponseJson(afterRemoveOld, malformed));
+        assertTrue(ex3.getMessage().contains("requires version-ids array"));
     }
 
     @Test
