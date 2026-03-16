@@ -1191,6 +1191,30 @@ class IcebergRestServerLogicTest {
                 () -> IcebergRestServer.applyCommitToTableResponseJson(base, badTableUuidFormat));
         assertTrue(ex3.getMessage().contains("requires valid UUID"));
 
+        String nonStringRequirementType = """
+                {"requirements":[{"type":123}],"updates":[]}
+                """;
+        IllegalArgumentException exType = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, nonStringRequirementType));
+        assertTrue(exType.getMessage().contains("Requirement type is missing"));
+
+        String assertCreateWithUnexpectedField = """
+                {"requirements":[{"type":"assert-create","unexpected":true}],"updates":[]}
+                """;
+        IllegalArgumentException exShape1 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, assertCreateWithUnexpectedField));
+        assertTrue(exShape1.getMessage().contains("assert-create has unsupported field"));
+
+        String assertRefSnapshotIdWithUnexpectedField = """
+                {"requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null,"unexpected":"x"}],"updates":[]}
+                """;
+        IllegalArgumentException exShape2 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, assertRefSnapshotIdWithUnexpectedField));
+        assertTrue(exShape2.getMessage().contains("assert-ref-snapshot-id has unsupported field"));
+
         String conflictCurrentSchema = """
                 {"requirements":[{"type":"assert-current-schema-id","current-schema-id":1}],"updates":[]}
                 """;
@@ -1198,6 +1222,36 @@ class IcebergRestServerLogicTest {
                 IllegalStateException.class,
                 () -> IcebergRestServer.applyCommitToTableResponseJson(base, conflictCurrentSchema));
         assertTrue(ex4.getMessage().contains("assert-current-schema-id failed"));
+    }
+
+    @Test
+    void viewRequirementValidationRejectsUnknownFields() throws Exception {
+        String base = IcebergRestServer.buildLoadViewResponseJson(
+                "sales",
+                """
+                {
+                  "name":"orders_view",
+                  "view-version":{"version-id":1,"timestamp-ms":1700000000000,"schema-id":0},
+                  "schema":{"type":"struct","schema-id":0,"fields":[]}
+                }
+                """);
+
+        String assertCreateWithUnexpectedField = """
+                {"requirements":[{"type":"assert-create","extra":"x"}],"updates":[]}
+                """;
+        IllegalArgumentException ex1 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToViewResponseJson(base, assertCreateWithUnexpectedField));
+        assertTrue(ex1.getMessage().contains("assert-create has unsupported field"));
+
+        String viewUuid = MAPPER.readTree(base).path("metadata").path("view-uuid").asText();
+        String assertViewUuidWithUnexpectedField = """
+                {"requirements":[{"type":"assert-view-uuid","uuid":"%s","extra":"x"}],"updates":[]}
+                """.formatted(viewUuid);
+        IllegalArgumentException ex2 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToViewResponseJson(base, assertViewUuidWithUnexpectedField));
+        assertTrue(ex2.getMessage().contains("assert-view-uuid has unsupported field"));
     }
 
     @Test
