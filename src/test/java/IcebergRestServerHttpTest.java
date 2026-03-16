@@ -531,6 +531,103 @@ class IcebergRestServerHttpTest {
     }
 
     @Test
+    void requirementFailureErrorEnvelopeMatrixIncludesStatusTypeCodeAndMessageClass() throws Exception {
+        request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
+        String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables", tableBody).statusCode);
+
+        assertErrorEnvelope(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":\"assert-unknown\",\"value\":1}],\"updates\":[]}",
+                400,
+                "BadRequestException",
+                "Unsupported requirement type");
+
+        assertErrorEnvelope(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":123}],\"updates\":[]}",
+                400,
+                "BadRequestException",
+                "Requirement type is missing");
+
+        assertErrorEnvelope(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":\"assert-create\"}],\"updates\":[]}",
+                409,
+                "CommitFailedException",
+                "assert-create failed");
+
+        assertErrorEnvelope(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":\"assert-current-schema-id\",\"current-schema-id\":\"0\"}],\"updates\":[]}",
+                400,
+                "BadRequestException",
+                "requires integer current-schema-id");
+
+        assertErrorEnvelope(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":\"assert-current-schema-id\",\"current-schema-id\":1}],\"updates\":[]}",
+                409,
+                "CommitFailedException",
+                "assert-current-schema-id failed");
+
+        assertErrorEnvelope(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":\"assert-ref-snapshot-id\",\"snapshot-id\":null}],\"updates\":[]}",
+                400,
+                "BadRequestException",
+                "requires non-empty ref");
+
+        String firstSnapshotCommit = """
+                {
+                  "requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null}],
+                  "updates":[
+                    {"action":"add-snapshot","snapshot":{"sequence-number":1,"snapshot-id":101,"timestamp-ms":1700000000000,"schema-id":0}},
+                    {"action":"set-snapshot-ref","ref-name":"main","snapshot-id":101,"type":"branch"}
+                  ]
+                }
+                """;
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables/orders", firstSnapshotCommit).statusCode);
+
+        assertErrorEnvelope(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"requirements\":[{\"type\":\"assert-ref-snapshot-id\",\"ref\":\"main\",\"snapshot-id\":null}],\"updates\":[]}",
+                409,
+                "CommitFailedException",
+                "assert-ref-snapshot-id failed");
+
+        String viewBody = """
+                {"name":"orders_v","view-version":{"version-id":1,"timestamp-ms":1700000000000,"schema-id":0},"schema":{"type":"struct","schema-id":0,"fields":[]}}
+                """;
+        HttpResponse createView = request("POST", "/v1/namespaces/analytics/views", viewBody);
+        assertEquals(200, createView.statusCode);
+        String viewUuid = MAPPER.readTree(createView.body).path("metadata").path("view-uuid").asText();
+
+        assertErrorEnvelope(
+                "POST",
+                "/v1/namespaces/analytics/views/orders_v",
+                "{\"requirements\":[{\"type\":\"assert-view-uuid\",\"uuid\":\"%s\",\"extra\":\"x\"}],\"updates\":[]}".formatted(viewUuid),
+                400,
+                "BadRequestException",
+                "has unsupported field");
+
+        assertErrorEnvelope(
+                "POST",
+                "/v1/namespaces/analytics/views/orders_v",
+                "{\"requirements\":[{\"type\":\"assert-view-uuid\",\"uuid\":\"11111111-1111-1111-1111-111111111111\"}],\"updates\":[]}",
+                409,
+                "CommitFailedException",
+                "assert-view-uuid failed");
+    }
+
+    @Test
     void repeatedCommitReturnsConflict() throws Exception {
         request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
         String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
