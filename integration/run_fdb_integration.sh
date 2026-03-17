@@ -6,6 +6,9 @@ LOG_DIR="${PROJECT_ROOT}/integration/logs"
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
 SERVER_LOG="${LOG_DIR}/fdb_server_${RUN_ID}.log"
 SERVER_GRADLE_ARGS=(-Dfdb=true)
+CONCURRENT_ITERATIONS="${CONCURRENT_ITERATIONS:-20}"
+MIXED_CONFLICT_ITERATIONS="${MIXED_CONFLICT_ITERATIONS:-12}"
+WRITE_CYCLE_ITERATIONS="${WRITE_CYCLE_ITERATIONS:-18}"
 
 START_SERVER=true
 RUN_SMOKE=true
@@ -181,6 +184,16 @@ assert_http_status() {
   fi
 }
 
+assert_concurrent_outcomes() {
+  local name="$1"
+  local status1="$2"
+  local status2="$3"
+  if ! { [[ "${status1}" == "200" && "${status2}" == "409" ]] || [[ "${status1}" == "409" && "${status2}" == "200" ]]; }; then
+    echo "${name} failed: expected one 200 and one 409, got ${status1} and ${status2}" >&2
+    exit 1
+  fi
+}
+
 start_server() {
   if [[ "${START_SERVER}" != "true" ]]; then
     wait_for_http "http://localhost:8181/v1/config" "Server"
@@ -337,7 +350,7 @@ else
 fi
 
 echo "==> Repeated concurrent writer conflict checks"
-for i in 1 2 3 4 5; do
+for ((i = 1; i <= CONCURRENT_ITERATIONS; i++)); do
   CW_TABLE="cw_${RUN_ID}_${i}"
   CW_CREATE_PAYLOAD="{\"name\":\"${CW_TABLE}\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}"
   CW_CREATE_RESP="$(run_http_request "POST" "http://localhost:8181/v1/namespaces/${NS}/tables" "${CW_CREATE_PAYLOAD}")"
@@ -364,11 +377,70 @@ for i in 1 2 3 4 5; do
   STATUS2="$(http_status "$(cat "${R2_FILE}")")"
   rm -f "${R1_FILE}" "${R2_FILE}"
 
-  if ! { [[ "${STATUS1}" == "200" && "${STATUS2}" == "409" ]] || [[ "${STATUS1}" == "409" && "${STATUS2}" == "200" ]]; }; then
-    echo "Concurrent writer check iteration ${i} failed: expected one 200 and one 409, got ${STATUS1} and ${STATUS2}" >&2
-    exit 1
-  fi
+  assert_concurrent_outcomes "Concurrent writer check iteration ${i}" "${STATUS1}" "${STATUS2}"
 done
+
+echo "==> Mixed update-action conflict checks"
+for ((i = 1; i <= MIXED_CONFLICT_ITERATIONS; i++)); do
+  MX_TABLE="mx_${RUN_ID}_${i}"
+  MX_CREATE_PAYLOAD="{\"name\":\"${MX_TABLE}\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}"
+  MX_CREATE_RESP="$(run_http_request "POST" "http://localhost:8181/v1/namespaces/${NS}/tables" "${MX_CREATE_PAYLOAD}")"
+  assert_http_status "create mixed-conflict table ${i}" "${MX_CREATE_RESP}" "200"
+
+  SNAP_A=$((810000 + i))
+  SNAP_B=$((910000 + i))
+  PAYLOAD_A='{"requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null}],"updates":[{"action":"add-snapshot","snapshot":{"sequence-number":1,"snapshot-id":'"${SNAP_A}"',"timestamp-ms":1773011000'"${i}"',"schema-id":0}},{"action":"set-snapshot-ref","ref-name":"main","snapshot-id":'"${SNAP_A}"',"type":"branch"},{"action":"set-properties","updates":{"writer":"A","batch":"'"${i}"'"}}]}'
+  PAYLOAD_B='{"requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null}],"updates":[{"action":"add-snapshot","snapshot":{"sequence-number":1,"snapshot-id":'"${SNAP_B}"',"timestamp-ms":1773012000'"${i}"',"schema-id":0}},{"action":"set-snapshot-ref","ref-name":"main","snapshot-id":'"${SNAP_B}"',"type":"branch"},{"action":"add-schema","schema":{"type":"struct","schema-id":2,"fields":[{"id":1,"name":"id","required":false,"type":"long"},{"id":2,"name":"note","required":false,"type":"string"}]},"last-column-id":2},{"action":"set-current-schema","schema-id":2}]}'
+
+  MA_FILE="$(mktemp)"
+  MB_FILE="$(mktemp)"
+  (
+    run_http_request "POST" "http://localhost:8181/v1/namespaces/${NS}/tables/${MX_TABLE}" "${PAYLOAD_A}" >"${MA_FILE}"
+  ) &
+  PID_A=$!
+  (
+    run_http_request "POST" "http://localhost:8181/v1/namespaces/${NS}/tables/${MX_TABLE}" "${PAYLOAD_B}" >"${MB_FILE}"
+  ) &
+  PID_B=$!
+
+  wait "${PID_A}"
+  wait "${PID_B}"
+
+  STATUS_A="$(http_status "$(cat "${MA_FILE}")")"
+  STATUS_B="$(http_status "$(cat "${MB_FILE}")")"
+  rm -f "${MA_FILE}" "${MB_FILE}"
+
+  assert_concurrent_outcomes "Mixed conflict check iteration ${i}" "${STATUS_A}" "${STATUS_B}"
+done
+
+if [[ "${START_SERVER}" == "true" ]]; then
+  echo "==> Restart during write cycle checks"
+  RW_TABLE="rw_${RUN_ID}"
+  RW_CREATE_PAYLOAD="{\"name\":\"${RW_TABLE}\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}"
+  RW_CREATE_RESP="$(run_http_request "POST" "http://localhost:8181/v1/namespaces/${NS}/tables" "${RW_CREATE_PAYLOAD}")"
+  assert_http_status "create restart-write table" "${RW_CREATE_RESP}" "200"
+
+  CURRENT_SNAPSHOT="null"
+  HALF_POINT=$((WRITE_CYCLE_ITERATIONS / 2))
+  for ((i = 1; i <= WRITE_CYCLE_ITERATIONS; i++)); do
+    SNAP=$((990000 + i))
+    WRITE_COMMIT='{"requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":'"${CURRENT_SNAPSHOT}"'}],"updates":[{"action":"add-snapshot","snapshot":{"sequence-number":'"${i}"',"snapshot-id":'"${SNAP}"',"timestamp-ms":1773013000'"${i}"',"schema-id":0}},{"action":"set-snapshot-ref","ref-name":"main","snapshot-id":'"${SNAP}"',"type":"branch"},{"action":"set-properties","updates":{"write-cycle":"'"${i}"'"}}]}'
+    WRITE_RESP="$(run_http_request "POST" "http://localhost:8181/v1/namespaces/${NS}/tables/${RW_TABLE}" "${WRITE_COMMIT}")"
+    assert_http_status "write-cycle commit ${i}" "${WRITE_RESP}" "200"
+    CURRENT_SNAPSHOT="${SNAP}"
+
+    if [[ "${i}" -eq "${HALF_POINT}" ]]; then
+      stop_server
+      start_server
+    fi
+  done
+
+  RW_GET="$(run_http_request "GET" "http://localhost:8181/v1/namespaces/${NS}/tables/${RW_TABLE}")"
+  assert_http_status "get table after write-cycle restarts" "${RW_GET}" "200"
+  assert_body_contains "write-cycle current snapshot" "${RW_GET}" "\"current-snapshot-id\":${CURRENT_SNAPSHOT}"
+else
+  echo "Skipping restart-during-write checks because --no-start-server was set."
+fi
 
 echo
 echo "FDB integration checks passed."

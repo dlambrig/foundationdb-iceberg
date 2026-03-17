@@ -54,13 +54,23 @@ This script:
 - validates metrics endpoint behavior pre/post restart
 - validates restart/reload behavior for both table and view metadata pointers
 - validates namespace/table/view pagination behavior via REST APIs
-- validates repeated concurrent writer conflict behavior (one commit succeeds, one conflicts per iteration)
+- validates longer repeated concurrent writer conflict behavior (one commit succeeds, one conflicts per iteration)
+- validates mixed update-action conflict behavior under concurrent commits
+- validates restart during write cycles and commit continuity after restart
 
 Options:
 
 ```bash
 ./integration/run_fdb_integration.sh --no-smoke
 ./integration/run_fdb_integration.sh --no-start-server
+```
+
+Stress knobs (optional env vars):
+
+```bash
+CONCURRENT_ITERATIONS=20
+MIXED_CONFLICT_ITERATIONS=12
+WRITE_CYCLE_ITERATIONS=18
 ```
 
 Use already-running server on `:8181`:
