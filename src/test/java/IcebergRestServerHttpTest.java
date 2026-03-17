@@ -245,7 +245,7 @@ class IcebergRestServerHttpTest {
                 {
                   "requirements":[{"type":"assert-view-uuid","uuid":"%s"}],
                   "updates":[
-                    {"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000}},
+                    {"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000,"summary":{},"default-namespace":["analytics"],"default-catalog":"prod","representations":[{"type":"sql","sql":"select 1","dialect":"trino"}]}},
                     {"action":"set-current-view-version","version-id":2},
                     {"action":"set-properties","updates":{"owner":"analytics-team"}}
                   ]
@@ -315,7 +315,7 @@ class IcebergRestServerHttpTest {
         String promoteV2 = """
                 {
                   "updates":[
-                    {"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000}},
+                    {"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000,"summary":{},"default-namespace":["analytics"],"default-catalog":"prod","representations":[{"type":"sql","sql":"select 1","dialect":"trino"}]}},
                     {"action":"set-current-view-version","version-id":2}
                   ]
                 }
@@ -344,6 +344,53 @@ class IcebergRestServerHttpTest {
                 """;
         HttpResponse badMalformed = request("POST", "/v1/namespaces/analytics/views/orders_view", malformed);
         assertEquals(400, badMalformed.statusCode);
+    }
+
+    @Test
+    void addViewVersionRejectsMalformedViewVersionShape() throws Exception {
+        request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
+
+        String createViewBody = """
+                {
+                  "name":"orders_view",
+                  "view-version":{"version-id":1,"timestamp-ms":1700000000000,"schema-id":0},
+                  "schema":{"type":"struct","schema-id":0,"fields":[]}
+                }
+                """;
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/views", createViewBody).statusCode);
+
+        String missingSummary = """
+                {"updates":[{"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000}}]}
+                """;
+        assertErrorEnvelope(
+                "POST",
+                "/v1/namespaces/analytics/views/orders_view",
+                missingSummary,
+                400,
+                "BadRequestException",
+                "requires summary object");
+
+        String badRepresentations = """
+                {"updates":[{"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000,"summary":{},"default-namespace":["analytics"],"representations":"bad"}}]}
+                """;
+        assertErrorEnvelope(
+                "POST",
+                "/v1/namespaces/analytics/views/orders_view",
+                badRepresentations,
+                400,
+                "BadRequestException",
+                "requires representations array");
+
+        String badDefaultNamespace = """
+                {"updates":[{"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000,"summary":{},"default-namespace":[1],"representations":[{"type":"sql","sql":"select 1","dialect":"trino"}]}}]}
+                """;
+        assertErrorEnvelope(
+                "POST",
+                "/v1/namespaces/analytics/views/orders_view",
+                badDefaultNamespace,
+                400,
+                "BadRequestException",
+                "default-namespace entries");
     }
 
     @Test

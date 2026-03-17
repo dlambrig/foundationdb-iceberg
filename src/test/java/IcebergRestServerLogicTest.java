@@ -1041,7 +1041,7 @@ class IcebergRestServerLogicTest {
                 {
                   "requirements":[{"type":"assert-view-uuid","uuid":"%s"}],
                   "updates":[
-                    {"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000}},
+                    {"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000,"summary":{},"default-namespace":["sales"],"default-catalog":"prod","representations":[{"type":"sql","sql":"select 1","dialect":"trino"}]}},
                     {"action":"set-current-view-version","version-id":2},
                     {"action":"set-properties","updates":{"owner":"analytics-team"}},
                     {"action":"set-location","location":"local:///iceberg_warehouse_custom/sales/views/orders_view"}
@@ -1102,6 +1102,38 @@ class IcebergRestServerLogicTest {
                 IllegalArgumentException.class,
                 () -> IcebergRestServer.applyCommitToViewResponseJson(base, missingTimestamp));
         assertTrue(ex4.getMessage().contains("requires integer timestamp-ms"));
+
+        String missingSummary = """
+                {"updates":[{"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000}}]}
+                """;
+        IllegalArgumentException ex5 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToViewResponseJson(base, missingSummary));
+        assertTrue(ex5.getMessage().contains("requires summary object"));
+
+        String badRepresentations = """
+                {"updates":[{"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000,"summary":{},"default-namespace":["sales"],"representations":"bad"}}]}
+                """;
+        IllegalArgumentException ex6 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToViewResponseJson(base, badRepresentations));
+        assertTrue(ex6.getMessage().contains("requires representations array"));
+
+        String badDefaultNamespace = """
+                {"updates":[{"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000,"summary":{},"default-namespace":[1],"representations":[{"type":"sql","sql":"select 1","dialect":"trino"}]}}]}
+                """;
+        IllegalArgumentException ex7 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToViewResponseJson(base, badDefaultNamespace));
+        assertTrue(ex7.getMessage().contains("default-namespace entries"));
+
+        String badSqlRepresentation = """
+                {"updates":[{"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000,"summary":{},"default-namespace":["sales"],"representations":[{"type":"sql","sql":"","dialect":"trino"}]}}]}
+                """;
+        IllegalArgumentException ex8 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToViewResponseJson(base, badSqlRepresentation));
+        assertTrue(ex8.getMessage().contains("requires non-empty sql"));
     }
 
     @Test
@@ -1120,7 +1152,7 @@ class IcebergRestServerLogicTest {
                 """
                 {
                   "updates":[
-                    {"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000}},
+                    {"action":"add-view-version","view-version":{"version-id":2,"schema-id":0,"timestamp-ms":1700000001000,"summary":{},"default-namespace":["sales"],"default-catalog":"prod","representations":[{"type":"sql","sql":"select 1","dialect":"trino"}]}},
                     {"action":"set-current-view-version","version-id":2}
                   ]
                 }

@@ -953,6 +953,7 @@ public class IcebergRestServer {
                 if (!schemaIdExists(schemas, schemaId)) {
                     throw new IllegalArgumentException("add-view-version references unknown schema-id: " + schemaId);
                 }
+                validateAddViewVersionShape(viewVersion);
                 versions.add(viewVersion.deepCopy());
 
                 ObjectNode logEntry = OBJECT_MAPPER.createObjectNode();
@@ -1053,6 +1054,63 @@ public class IcebergRestServer {
             return OBJECT_MAPPER.writeValueAsString(updatedRoot);
         } catch (JsonProcessingException e) {
             throw new IllegalArgumentException("Failed to serialize updated view metadata");
+        }
+    }
+
+    private static void validateAddViewVersionShape(JsonNode viewVersion) {
+        JsonNode summaryNode = viewVersion.get("summary");
+        if (summaryNode == null || !summaryNode.isObject()) {
+            throw new IllegalArgumentException("add-view-version requires summary object");
+        }
+        Iterator<Map.Entry<String, JsonNode>> summaryFields = summaryNode.fields();
+        while (summaryFields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = summaryFields.next();
+            if (entry.getKey() == null || entry.getKey().isEmpty()) {
+                throw new IllegalArgumentException("add-view-version summary keys must be non-empty");
+            }
+            if (!entry.getValue().isTextual()) {
+                throw new IllegalArgumentException("add-view-version summary values must be strings");
+            }
+        }
+
+        JsonNode representationsNode = viewVersion.get("representations");
+        if (representationsNode == null || !representationsNode.isArray()) {
+            throw new IllegalArgumentException("add-view-version requires representations array");
+        }
+        for (JsonNode representationNode : representationsNode) {
+            if (!representationNode.isObject()) {
+                throw new IllegalArgumentException("add-view-version representations entries must be objects");
+            }
+            JsonNode typeNode = representationNode.get("type");
+            if (typeNode == null || !typeNode.isTextual() || typeNode.asText("").isEmpty()) {
+                throw new IllegalArgumentException("add-view-version representation requires non-empty type");
+            }
+            if ("sql".equalsIgnoreCase(typeNode.asText())) {
+                JsonNode sqlNode = representationNode.get("sql");
+                if (sqlNode == null || !sqlNode.isTextual() || sqlNode.asText("").isEmpty()) {
+                    throw new IllegalArgumentException("add-view-version sql representation requires non-empty sql");
+                }
+                JsonNode dialectNode = representationNode.get("dialect");
+                if (dialectNode == null || !dialectNode.isTextual() || dialectNode.asText("").isEmpty()) {
+                    throw new IllegalArgumentException("add-view-version sql representation requires non-empty dialect");
+                }
+            }
+        }
+
+        JsonNode defaultNamespaceNode = viewVersion.get("default-namespace");
+        if (defaultNamespaceNode == null || !defaultNamespaceNode.isArray()) {
+            throw new IllegalArgumentException("add-view-version requires default-namespace string array");
+        }
+        for (JsonNode levelNode : defaultNamespaceNode) {
+            if (!levelNode.isTextual() || levelNode.asText("").isEmpty()) {
+                throw new IllegalArgumentException("add-view-version default-namespace entries must be non-empty strings");
+            }
+        }
+
+        JsonNode defaultCatalogNode = viewVersion.get("default-catalog");
+        if (defaultCatalogNode != null && !defaultCatalogNode.isNull()
+                && (!defaultCatalogNode.isTextual() || defaultCatalogNode.asText("").isEmpty())) {
+            throw new IllegalArgumentException("add-view-version default-catalog must be a non-empty string");
         }
     }
 
