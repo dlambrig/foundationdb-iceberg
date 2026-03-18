@@ -161,13 +161,73 @@ public class IcebergRestServer {
             schema.put("schema-id", 0);
         }
 
-        long lastColumnId = 0;
+        Map<Integer, Integer> fieldIdRemap = new LinkedHashMap<>();
+        int nextFieldId = 1;
         JsonNode fieldsNode = schema.get("fields");
         if (fieldsNode != null && fieldsNode.isArray()) {
             for (JsonNode field : fieldsNode) {
-                long id = field.path("id").asLong(0);
-                if (id > lastColumnId) {
-                    lastColumnId = id;
+                if (!field.isObject()) {
+                    continue;
+                }
+                ObjectNode fieldObject = (ObjectNode) field;
+                int oldId = fieldObject.path("id").asInt(nextFieldId);
+                int newId = nextFieldId++;
+                fieldIdRemap.put(oldId, newId);
+                fieldObject.put("id", newId);
+            }
+        }
+        long lastColumnId = Math.max(0, nextFieldId - 1);
+
+        JsonNode partitionSpecNode = request.get("partition-spec");
+        ObjectNode partitionSpec = OBJECT_MAPPER.createObjectNode();
+        partitionSpec.put("spec-id", 0);
+        ArrayNode partitionFields = partitionSpec.putArray("fields");
+        if (partitionSpecNode != null && partitionSpecNode.isObject()) {
+            int requestSpecId = partitionSpecNode.path("spec-id").asInt(0);
+            partitionSpec.put("spec-id", requestSpecId);
+            JsonNode requestFields = partitionSpecNode.get("fields");
+            if (requestFields != null && requestFields.isArray()) {
+                for (JsonNode field : requestFields) {
+                    if (!field.isObject()) {
+                        continue;
+                    }
+                    ObjectNode copied = field.deepCopy();
+                    JsonNode sourceIdNode = copied.get("source-id");
+                    if (sourceIdNode != null && sourceIdNode.canConvertToInt()) {
+                        int sourceId = sourceIdNode.asInt();
+                        Integer remapped = fieldIdRemap.get(sourceId);
+                        if (remapped != null) {
+                            copied.put("source-id", remapped);
+                        }
+                    }
+                    partitionFields.add(copied);
+                }
+            }
+        }
+
+        JsonNode writeOrderNode = request.get("write-order");
+        ObjectNode writeOrder = OBJECT_MAPPER.createObjectNode();
+        writeOrder.put("order-id", 0);
+        ArrayNode sortFields = writeOrder.putArray("fields");
+        if (writeOrderNode != null && writeOrderNode.isObject()) {
+            int requestOrderId = writeOrderNode.path("order-id").asInt(0);
+            writeOrder.put("order-id", requestOrderId);
+            JsonNode requestFields = writeOrderNode.get("fields");
+            if (requestFields != null && requestFields.isArray()) {
+                for (JsonNode field : requestFields) {
+                    if (!field.isObject()) {
+                        continue;
+                    }
+                    ObjectNode copied = field.deepCopy();
+                    JsonNode sourceIdNode = copied.get("source-id");
+                    if (sourceIdNode != null && sourceIdNode.canConvertToInt()) {
+                        int sourceId = sourceIdNode.asInt();
+                        Integer remapped = fieldIdRemap.get(sourceId);
+                        if (remapped != null) {
+                            copied.put("source-id", remapped);
+                        }
+                    }
+                    sortFields.add(copied);
                 }
             }
         }
@@ -188,22 +248,23 @@ public class IcebergRestServer {
         ArrayNode schemas = metadata.putArray("schemas");
         schemas.add(schema);
 
-        metadata.put("default-spec-id", 0);
+        metadata.put("default-spec-id", partitionSpec.path("spec-id").asInt(0));
         ArrayNode partitionSpecs = metadata.putArray("partition-specs");
-        ObjectNode spec = OBJECT_MAPPER.createObjectNode();
-        spec.put("spec-id", 0);
-        spec.putArray("fields");
-        partitionSpecs.add(spec);
+        partitionSpecs.add(partitionSpec);
 
         metadata.put("last-partition-id", 999);
-        metadata.put("default-sort-order-id", 0);
+        metadata.put("default-sort-order-id", writeOrder.path("order-id").asInt(0));
         ArrayNode sortOrders = metadata.putArray("sort-orders");
-        ObjectNode sortOrder = OBJECT_MAPPER.createObjectNode();
-        sortOrder.put("order-id", 0);
-        sortOrder.putArray("fields");
-        sortOrders.add(sortOrder);
+        sortOrders.add(writeOrder);
 
-        metadata.putObject("properties");
+        ObjectNode metadataProperties = metadata.putObject("properties");
+        JsonNode propertiesNode = request.get("properties");
+        if (propertiesNode != null && !propertiesNode.isNull()) {
+            if (!propertiesNode.isObject()) {
+                throw new IllegalArgumentException("Invalid properties");
+            }
+            propertiesNode.fields().forEachRemaining(entry -> metadataProperties.put(entry.getKey(), entry.getValue().asText("")));
+        }
         metadata.put("current-snapshot-id", -1);
         metadata.putObject("refs");
         metadata.putArray("snapshots");
@@ -237,25 +298,22 @@ public class IcebergRestServer {
         metadata.put("last-sequence-number", 0);
         metadata.put("last-updated-ms", System.currentTimeMillis());
         metadata.put("last-column-id", 0);
-        metadata.put("current-schema-id", -1);
+        metadata.put("current-schema-id", 0);
         metadata.putArray("schemas");
-
-        metadata.put("default-spec-id", -1);
+        metadata.put("default-spec-id", 0);
         metadata.putArray("partition-specs");
-
         metadata.put("last-partition-id", 999);
-        metadata.put("default-sort-order-id", -1);
+        metadata.put("default-sort-order-id", 0);
         metadata.putArray("sort-orders");
-
         metadata.putObject("properties");
         metadata.put("current-snapshot-id", -1);
         metadata.putObject("refs");
         metadata.putArray("snapshots");
         metadata.putArray("statistics");
         metadata.putArray("partition-statistics");
-        metadata.putArray("encryption-keys");
         metadata.putArray("snapshot-log");
         metadata.putArray("metadata-log");
+        metadata.putArray("encryption-keys");
 
         ObjectNode response = OBJECT_MAPPER.createObjectNode();
         response.put("metadata-location", metadataLocation);
@@ -264,27 +322,26 @@ public class IcebergRestServer {
         try {
             return OBJECT_MAPPER.writeValueAsString(response);
         } catch (JsonProcessingException e) {
-            throw new IllegalArgumentException("Failed to build empty table response");
+            throw new IllegalArgumentException("Failed to build table response");
         }
     }
 
     static boolean hasAssertCreateRequirement(String commitRequestBody) {
-        JsonNode root;
         try {
-            root = OBJECT_MAPPER.readTree(commitRequestBody);
+            JsonNode commitRoot = OBJECT_MAPPER.readTree(commitRequestBody);
+            JsonNode requirements = commitRoot.get("requirements");
+            if (requirements == null || !requirements.isArray()) {
+                return false;
+            }
+            for (JsonNode requirement : requirements) {
+                if (requirement.isObject() && "assert-create".equals(requirement.path("type").asText())) {
+                    return true;
+                }
+            }
+            return false;
         } catch (JsonProcessingException e) {
-            throw new IllegalArgumentException("Invalid JSON payload");
-        }
-        JsonNode requirements = root.get("requirements");
-        if (requirements == null || !requirements.isArray()) {
             return false;
         }
-        for (JsonNode requirement : requirements) {
-            if ("assert-create".equals(requirement.path("type").asText(""))) {
-                return true;
-            }
-        }
-        return false;
     }
 
     static String buildLoadViewResponseJson(String namespace, String createViewRequestBody) {
@@ -379,6 +436,10 @@ public class IcebergRestServer {
     }
 
     static String applyCommitToTableResponseJson(String existingResponseJson, String commitRequestBody) {
+        return applyCommitToTableResponseJson(existingResponseJson, commitRequestBody, true);
+    }
+
+    static String applyCommitToTableResponseJson(String existingResponseJson, String commitRequestBody, boolean tableAlreadyExists) {
         JsonNode existingRoot;
         JsonNode commitRoot;
         try {
@@ -400,7 +461,7 @@ public class IcebergRestServer {
         }
         normalizeAndValidateMetadataChain(metadata, currentMetadataLocation, "table");
 
-        validateCommitRequirements(commitRoot, metadata);
+        validateCommitRequirements(commitRoot, metadata, tableAlreadyExists);
 
         ArrayNode snapshots = ensureArray(metadata, "snapshots");
         ObjectNode refs = ensureObject(metadata, "refs");
@@ -1366,7 +1427,7 @@ public class IcebergRestServer {
     private record MetadataFileRef(int version, String location) {
     }
 
-    private static void validateCommitRequirements(JsonNode commitRoot, ObjectNode metadata) {
+    private static void validateCommitRequirements(JsonNode commitRoot, ObjectNode metadata, boolean tableAlreadyExists) {
         JsonNode requirements = commitRoot.get("requirements");
         if (requirements == null || requirements.isMissingNode()) {
             return;
@@ -1381,9 +1442,7 @@ public class IcebergRestServer {
             String type = requireRequirementType(requirement);
             if ("assert-create".equals(type)) {
                 validateRequirementFields(requirement, type, Set.of());
-                String currentUuid = metadata.path("table-uuid").asText("");
-                boolean hasSchema = metadata.path("schemas").isArray() && metadata.path("schemas").size() > 0;
-                if (!currentUuid.isEmpty() || hasSchema) {
+                if (tableAlreadyExists) {
                     throw new IllegalStateException("assert-create failed");
                 }
             } else if ("assert-table-uuid".equals(type)) {

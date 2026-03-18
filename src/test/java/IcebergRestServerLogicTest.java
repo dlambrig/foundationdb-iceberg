@@ -18,6 +18,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -42,6 +43,35 @@ class IcebergRestServerLogicTest {
         assertTrue(metadataLocation.startsWith("local:///iceberg_warehouse/_rest_metadata/"));
         assertEquals("local:///iceberg_warehouse/sales/orders", tableLocation);
         assertEquals(2, root.path("metadata").path("format-version").asInt());
+    }
+
+    @Test
+    void buildLoadTableResponseJsonNormalizesFieldIdsAndRemapsSourceIds() throws Exception {
+        String createRequest = """
+                {
+                  "name":"orders",
+                  "schema":{"type":"struct","schema-id":0,"fields":[
+                    {"id":3,"name":"id","required":true,"type":"int"},
+                    {"id":4,"name":"data","required":true,"type":"string"}
+                  ]},
+                  "properties":{"user":"someone","created-at":"2022-02-25T00:38:19"},
+                  "partition-spec":{"spec-id":5,"fields":[{"name":"id_bucket","transform":"bucket[16]","source-id":3,"field-id":1000}]},
+                  "write-order":{"order-id":7,"fields":[{"transform":"identity","source-id":3,"direction":"asc","null-order":"nulls-first"}]}
+                }
+                """;
+
+        String response = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+        JsonNode metadata = MAPPER.readTree(response).path("metadata");
+        JsonNode fields = metadata.path("schemas").get(0).path("fields");
+        assertEquals(1, fields.get(0).path("id").asInt());
+        assertEquals(2, fields.get(1).path("id").asInt());
+        assertEquals(2, metadata.path("last-column-id").asInt());
+        assertEquals(5, metadata.path("default-spec-id").asInt());
+        assertEquals(7, metadata.path("default-sort-order-id").asInt());
+        assertEquals("someone", metadata.path("properties").path("user").asText());
+        assertEquals("2022-02-25T00:38:19", metadata.path("properties").path("created-at").asText());
+        assertEquals(1, metadata.path("partition-specs").get(0).path("fields").get(0).path("source-id").asInt());
+        assertEquals(1, metadata.path("sort-orders").get(0).path("fields").get(0).path("source-id").asInt());
     }
 
     @Test
@@ -938,6 +968,33 @@ class IcebergRestServerLogicTest {
                 IllegalStateException.class,
                 () -> IcebergRestServer.applyCommitToTableResponseJson(base, commit));
         assertTrue(ex.getMessage().contains("assert-create failed"));
+    }
+
+    @Test
+    void assertCreateRequirementAllowsCreateOnMissingTableCommitPath() throws Exception {
+        String base = IcebergRestServer.buildEmptyTableResponseJson("sales", "orders");
+        String commit = """
+                {
+                  "requirements":[{"type":"assert-create"}],
+                  "updates":[
+                    {"action":"add-schema","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]},"last-column-id":1},
+                    {"action":"set-current-schema","schema-id":0}
+                  ]
+                }
+                """;
+        String updated = IcebergRestServer.applyCommitToTableResponseJson(base, commit, false);
+        JsonNode metadata = MAPPER.readTree(updated).path("metadata");
+        assertEquals(1, metadata.path("last-column-id").asInt());
+        assertEquals(0, metadata.path("current-schema-id").asInt());
+        assertEquals(1, metadata.path("schemas").size());
+    }
+
+    @Test
+    void hasAssertCreateRequirementRecognizesPayloads() {
+        assertTrue(IcebergRestServer.hasAssertCreateRequirement("{\"requirements\":[{\"type\":\"assert-create\"}],\"updates\":[]}"));
+        assertFalse(IcebergRestServer.hasAssertCreateRequirement("{\"requirements\":[{\"type\":\"assert-table-uuid\",\"uuid\":\"u\"}],\"updates\":[]}"));
+        assertFalse(IcebergRestServer.hasAssertCreateRequirement("{\"updates\":[]}"));
+        assertFalse(IcebergRestServer.hasAssertCreateRequirement("{invalid"));
     }
 
     @Test
