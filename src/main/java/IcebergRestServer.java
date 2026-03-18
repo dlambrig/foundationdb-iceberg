@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -44,6 +45,11 @@ public class IcebergRestServer {
     private static final String WRITE_METADATA_DELETE_AFTER_COMMIT_ENABLED = "write.metadata.delete-after-commit.enabled";
     private static final String WRITE_METADATA_PREVIOUS_VERSIONS_MAX = "write.metadata.previous-versions-max";
     private static final int DEFAULT_PREVIOUS_VERSIONS_MAX = 100;
+    private static final String ERROR_TYPE_NO_SUCH_NAMESPACE = "NoSuchNamespaceException";
+    private static final String ERROR_TYPE_NO_SUCH_TABLE = "NoSuchTableException";
+    private static final String ERROR_TYPE_NO_SUCH_VIEW = "NoSuchViewException";
+    private static final String ERROR_TYPE_NOT_FOUND = "NotFoundException";
+    private static final char NAMESPACE_PART_SEPARATOR = '\u001F';
 
     private static NamespaceStore namespaceStore;
     private static TableStore tableStore;
@@ -217,6 +223,68 @@ public class IcebergRestServer {
         } catch (JsonProcessingException e) {
             throw new IllegalArgumentException("Failed to build table response");
         }
+    }
+
+    static String buildEmptyTableResponseJson(String namespace, String tableName) {
+        String tableUuid = UUID.randomUUID().toString();
+        String tableLocation = DEFAULT_WAREHOUSE_LOCATION + "/" + namespace + "/" + tableName;
+        String metadataLocation = DEFAULT_WAREHOUSE_LOCATION + "/_rest_metadata/" + tableUuid + "/00000-" + tableUuid + ".metadata.json";
+
+        ObjectNode metadata = OBJECT_MAPPER.createObjectNode();
+        metadata.put("format-version", 2);
+        metadata.put("table-uuid", "");
+        metadata.put("location", tableLocation);
+        metadata.put("last-sequence-number", 0);
+        metadata.put("last-updated-ms", System.currentTimeMillis());
+        metadata.put("last-column-id", 0);
+        metadata.put("current-schema-id", -1);
+        metadata.putArray("schemas");
+
+        metadata.put("default-spec-id", -1);
+        metadata.putArray("partition-specs");
+
+        metadata.put("last-partition-id", 999);
+        metadata.put("default-sort-order-id", -1);
+        metadata.putArray("sort-orders");
+
+        metadata.putObject("properties");
+        metadata.put("current-snapshot-id", -1);
+        metadata.putObject("refs");
+        metadata.putArray("snapshots");
+        metadata.putArray("statistics");
+        metadata.putArray("partition-statistics");
+        metadata.putArray("encryption-keys");
+        metadata.putArray("snapshot-log");
+        metadata.putArray("metadata-log");
+
+        ObjectNode response = OBJECT_MAPPER.createObjectNode();
+        response.put("metadata-location", metadataLocation);
+        response.set("metadata", metadata);
+        response.putObject("config");
+        try {
+            return OBJECT_MAPPER.writeValueAsString(response);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Failed to build empty table response");
+        }
+    }
+
+    static boolean hasAssertCreateRequirement(String commitRequestBody) {
+        JsonNode root;
+        try {
+            root = OBJECT_MAPPER.readTree(commitRequestBody);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Invalid JSON payload");
+        }
+        JsonNode requirements = root.get("requirements");
+        if (requirements == null || !requirements.isArray()) {
+            return false;
+        }
+        for (JsonNode requirement : requirements) {
+            if ("assert-create".equals(requirement.path("type").asText(""))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static String buildLoadViewResponseJson(String namespace, String createViewRequestBody) {
@@ -697,6 +765,20 @@ public class IcebergRestServer {
                     throw new IllegalArgumentException("set-default-spec requires integer spec-id");
                 }
                 ArrayNode partitionSpecs = ensureArray(metadata, "partition-specs");
+                if (specId == -1) {
+                    int latestSpecId = Integer.MIN_VALUE;
+                    for (JsonNode existingSpec : partitionSpecs) {
+                        int candidate = existingSpec.path("spec-id").asInt(Integer.MIN_VALUE);
+                        if (candidate > latestSpecId) {
+                            latestSpecId = candidate;
+                        }
+                    }
+                    if (latestSpecId == Integer.MIN_VALUE) {
+                        throw new IllegalArgumentException("set-default-spec references unknown spec-id: -1");
+                    }
+                    metadata.put("default-spec-id", latestSpecId);
+                    continue;
+                }
                 boolean exists = false;
                 for (JsonNode existingSpec : partitionSpecs) {
                     if (existingSpec.path("spec-id").asInt(Integer.MIN_VALUE) == specId) {
@@ -825,6 +907,20 @@ public class IcebergRestServer {
                     throw new IllegalArgumentException("set-default-sort-order requires integer sort-order-id");
                 }
                 ArrayNode sortOrders = ensureArray(metadata, "sort-orders");
+                if (sortOrderId == -1) {
+                    int latestSortOrderId = Integer.MIN_VALUE;
+                    for (JsonNode existingOrder : sortOrders) {
+                        int candidate = existingOrder.path("order-id").asInt(Integer.MIN_VALUE);
+                        if (candidate > latestSortOrderId) {
+                            latestSortOrderId = candidate;
+                        }
+                    }
+                    if (latestSortOrderId == Integer.MIN_VALUE) {
+                        throw new IllegalArgumentException("set-default-sort-order references unknown sort-order-id: -1");
+                    }
+                    metadata.put("default-sort-order-id", latestSortOrderId);
+                    continue;
+                }
                 boolean exists = false;
                 for (JsonNode existingOrder : sortOrders) {
                     if (existingOrder.path("order-id").asInt(Integer.MIN_VALUE) == sortOrderId) {
@@ -1285,7 +1381,11 @@ public class IcebergRestServer {
             String type = requireRequirementType(requirement);
             if ("assert-create".equals(type)) {
                 validateRequirementFields(requirement, type, Set.of());
-                throw new IllegalStateException("assert-create failed");
+                String currentUuid = metadata.path("table-uuid").asText("");
+                boolean hasSchema = metadata.path("schemas").isArray() && metadata.path("schemas").size() > 0;
+                if (!currentUuid.isEmpty() || hasSchema) {
+                    throw new IllegalStateException("assert-create failed");
+                }
             } else if ("assert-table-uuid".equals(type)) {
                 validateRequirementFields(requirement, type, Set.of("uuid"));
                 String expected = requireUuidRequirement(requirement, "uuid", "assert-table-uuid");
@@ -1775,12 +1875,15 @@ public class IcebergRestServer {
 
                 if ("POST".equals(method)) {
                     if (!"/v1/namespaces".equals(path) && !"/v1/namespaces/".equals(path)) {
-                        sendIcebergError(exchange, 404, "Not Found", method, path);
+                        sendIcebergError(exchange, 404, "Not Found", ERROR_TYPE_NOT_FOUND, method, path);
                         return;
                     }
                     handleCreateNamespace(exchange, method, path);
                     return;
                 }
+            } catch (IllegalArgumentException e) {
+                sendIcebergError(exchange, 400, e.getMessage() == null ? "Bad request" : e.getMessage(), method, path);
+                return;
             } catch (RuntimeException e) {
                 sendIcebergError(exchange, 500, "Internal Server Error", method, path);
                 throw e;
@@ -1791,44 +1894,54 @@ public class IcebergRestServer {
 
         private void handleViewRoutes(HttpExchange exchange, String method, String path) throws IOException {
             String suffix = path.substring(TABLE_PATH_PREFIX.length());
-            String[] parts = suffix.split("/");
-            if (parts.length < 2 || !"views".equals(parts[1])) {
-                sendIcebergError(exchange, 404, "Not Found", method, path);
+            int viewsIdx = suffix.indexOf(VIEWS_SEGMENT);
+            if (viewsIdx < 0) {
+                sendIcebergError(exchange, 404, "Not Found", ERROR_TYPE_NOT_FOUND, method, path);
                 return;
             }
 
-            String namespace = parts[0];
+            String namespace = decodeNamespacePath(suffix.substring(0, viewsIdx));
+            String remainder = suffix.substring(viewsIdx + VIEWS_SEGMENT.length());
+            if (!remainder.isEmpty() && !remainder.startsWith("/")) {
+                sendIcebergError(exchange, 404, "Not Found", ERROR_TYPE_NOT_FOUND, method, path);
+                return;
+            }
+            String[] tailParts = remainder.isEmpty() ? new String[0] : remainder.substring(1).split("/");
             if (!namespaceStore.listNamespaces().contains(namespace)) {
-                sendIcebergError(exchange, 404, "Namespace not found: " + namespace, method, path);
+                if (tailParts.length == 1) {
+                    sendIcebergError(exchange, 404, "View not found: " + namespace + "." + tailParts[0], ERROR_TYPE_NO_SUCH_VIEW, method, path);
+                } else {
+                    sendIcebergError(exchange, 404, namespaceDoesNotExistMessage(namespace), ERROR_TYPE_NO_SUCH_NAMESPACE, method, path);
+                }
                 return;
             }
 
-            if ("POST".equals(method) && parts.length == 2) {
+            if ("POST".equals(method) && tailParts.length == 0) {
                 handleCreateView(exchange, method, path, namespace);
                 return;
             }
 
-            if ("GET".equals(method) && parts.length == 2) {
+            if ("GET".equals(method) && tailParts.length == 0) {
                 handleListViews(exchange, method, path, namespace, exchange.getRequestURI().getQuery());
                 return;
             }
 
-            if ("GET".equals(method) && parts.length == 3) {
-                handleGetView(exchange, method, path, namespace, parts[2]);
+            if ("GET".equals(method) && tailParts.length == 1) {
+                handleGetView(exchange, method, path, namespace, tailParts[0]);
                 return;
             }
 
-            if ("POST".equals(method) && parts.length == 3) {
-                handleCommitView(exchange, method, path, namespace, parts[2]);
+            if ("POST".equals(method) && tailParts.length == 1) {
+                handleCommitView(exchange, method, path, namespace, tailParts[0]);
                 return;
             }
 
-            if ("DELETE".equals(method) && parts.length == 3) {
-                handleDeleteView(exchange, method, path, namespace, parts[2]);
+            if ("DELETE".equals(method) && tailParts.length == 1) {
+                handleDeleteView(exchange, method, path, namespace, tailParts[0]);
                 return;
             }
 
-            sendIcebergError(exchange, 404, "Not Found", method, path);
+            sendIcebergError(exchange, 404, "Not Found", ERROR_TYPE_NOT_FOUND, method, path);
         }
 
         private void handleUpdateNamespaceProperties(HttpExchange exchange, String method, String path) throws IOException {
@@ -1836,12 +1949,13 @@ public class IcebergRestServer {
             if (namespace.endsWith("/")) {
                 namespace = namespace.substring(0, namespace.length() - 1);
             }
-            if (namespace.isEmpty() || namespace.contains("/")) {
-                sendIcebergError(exchange, 404, "Not Found", method, path);
+            if (namespace.isEmpty()) {
+                sendIcebergError(exchange, 404, "Not Found", ERROR_TYPE_NOT_FOUND, method, path);
                 return;
             }
+            namespace = decodeNamespacePath(namespace);
             if (!namespaceStore.listNamespaces().contains(namespace)) {
-                sendIcebergError(exchange, 404, "Namespace not found: " + namespace, method, path);
+                sendIcebergError(exchange, 404, namespaceDoesNotExistMessage(namespace), ERROR_TYPE_NO_SUCH_NAMESPACE, method, path);
                 return;
             }
 
@@ -1891,49 +2005,59 @@ public class IcebergRestServer {
 
         private void handleTableRoutes(HttpExchange exchange, String method, String path) throws IOException {
             String suffix = path.substring(TABLE_PATH_PREFIX.length());
-            String[] parts = suffix.split("/");
-            if (parts.length < 2 || !"tables".equals(parts[1])) {
-                sendIcebergError(exchange, 404, "Not Found", method, path);
+            int tablesIdx = suffix.indexOf(TABLES_SEGMENT);
+            if (tablesIdx < 0) {
+                sendIcebergError(exchange, 404, "Not Found", ERROR_TYPE_NOT_FOUND, method, path);
                 return;
             }
 
-            String namespace = parts[0];
+            String namespace = decodeNamespacePath(suffix.substring(0, tablesIdx));
+            String remainder = suffix.substring(tablesIdx + TABLES_SEGMENT.length());
+            if (!remainder.isEmpty() && !remainder.startsWith("/")) {
+                sendIcebergError(exchange, 404, "Not Found", ERROR_TYPE_NOT_FOUND, method, path);
+                return;
+            }
+            String[] tailParts = remainder.isEmpty() ? new String[0] : remainder.substring(1).split("/");
             if (!namespaceStore.listNamespaces().contains(namespace)) {
-                sendIcebergError(exchange, 404, "Namespace not found: " + namespace, method, path);
+                if (tailParts.length >= 1) {
+                    sendIcebergError(exchange, 404, "Table not found: " + namespace + "." + tailParts[0], ERROR_TYPE_NO_SUCH_TABLE, method, path);
+                } else {
+                    sendIcebergError(exchange, 404, namespaceDoesNotExistMessage(namespace), ERROR_TYPE_NO_SUCH_NAMESPACE, method, path);
+                }
                 return;
             }
 
-            if ("POST".equals(method) && parts.length == 2) {
+            if ("POST".equals(method) && tailParts.length == 0) {
                 handleCreateTable(exchange, method, path, namespace);
                 return;
             }
 
-            if ("GET".equals(method) && parts.length == 2) {
+            if ("GET".equals(method) && tailParts.length == 0) {
                 handleListTables(exchange, method, path, namespace, exchange.getRequestURI().getQuery());
                 return;
             }
 
-            if ("GET".equals(method) && parts.length == 3) {
-                handleGetTable(exchange, method, path, namespace, parts[2]);
+            if ("GET".equals(method) && tailParts.length == 1) {
+                handleGetTable(exchange, method, path, namespace, tailParts[0]);
                 return;
             }
 
-            if ("POST".equals(method) && parts.length == 3) {
-                handleCommitTable(exchange, method, path, namespace, parts[2]);
+            if ("POST".equals(method) && tailParts.length == 1) {
+                handleCommitTable(exchange, method, path, namespace, tailParts[0]);
                 return;
             }
 
-            if ("DELETE".equals(method) && parts.length == 3) {
-                handleDeleteTable(exchange, method, path, namespace, parts[2]);
+            if ("DELETE".equals(method) && tailParts.length == 1) {
+                handleDeleteTable(exchange, method, path, namespace, tailParts[0]);
                 return;
             }
 
-            if ("POST".equals(method) && parts.length == 4 && "metrics".equals(parts[3])) {
-                handleReportMetrics(exchange, method, path, namespace, parts[2]);
+            if ("POST".equals(method) && tailParts.length == 2 && "metrics".equals(tailParts[1])) {
+                handleReportMetrics(exchange, method, path, namespace, tailParts[0]);
                 return;
             }
 
-            sendIcebergError(exchange, 404, "Not Found", method, path);
+            sendIcebergError(exchange, 404, "Not Found", ERROR_TYPE_NOT_FOUND, method, path);
         }
 
         private void handleGetNamespace(HttpExchange exchange, String method, String path, String query) throws IOException {
@@ -1956,13 +2080,13 @@ public class IcebergRestServer {
             }
 
             if (!path.startsWith("/v1/namespaces/")) {
-                sendIcebergError(exchange, 404, "Not Found", method, path);
+                sendIcebergError(exchange, 404, "Not Found", ERROR_TYPE_NOT_FOUND, method, path);
                 return;
             }
 
-            String suffix = path.substring("/v1/namespaces/".length());
-            if (suffix.isEmpty() || suffix.contains("/")) {
-                sendIcebergError(exchange, 404, "Not Found", method, path);
+            String suffix = decodeNamespacePath(path.substring("/v1/namespaces/".length()));
+            if (suffix.isEmpty()) {
+                sendIcebergError(exchange, 404, "Not Found", ERROR_TYPE_NOT_FOUND, method, path);
                 return;
             }
 
@@ -1972,7 +2096,7 @@ public class IcebergRestServer {
             }
 
             if (!namespaceStore.listNamespaces().contains(suffix)) {
-                sendIcebergError(exchange, 404, "Namespace not found: " + suffix, method, path);
+                sendIcebergError(exchange, 404, namespaceDoesNotExistMessage(suffix), ERROR_TYPE_NO_SUCH_NAMESPACE, method, path);
                 return;
             }
 
@@ -1982,25 +2106,23 @@ public class IcebergRestServer {
         private void handleGetTable(HttpExchange exchange, String method, String path, String namespace, String table) throws IOException {
             String responseJson = tableStore.getTableResponse(namespace, table);
             if (responseJson == null) {
-                sendIcebergError(exchange, 404, "Table not found: " + namespace + "." + table, method, path);
+                sendIcebergError(exchange, 404, "Table not found: " + namespace + "." + table, ERROR_TYPE_NO_SUCH_TABLE, method, path);
                 return;
             }
-            String normalizedResponseJson = normalizeMetadataLocation(responseJson);
-            persistMetadataFile(normalizedResponseJson);
-            tableStore.putTableResponse(namespace, table, normalizedResponseJson);
-            sendJson(exchange, 200, normalizedResponseJson, method, path);
+            persistMetadataFile(responseJson);
+            tableStore.putTableResponse(namespace, table, responseJson);
+            sendJson(exchange, 200, responseJson, method, path);
         }
 
         private void handleGetView(HttpExchange exchange, String method, String path, String namespace, String view) throws IOException {
             String responseJson = viewStore.getViewResponse(namespace, view);
             if (responseJson == null) {
-                sendIcebergError(exchange, 404, "View not found: " + namespace + "." + view, method, path);
+                sendIcebergError(exchange, 404, "View not found: " + namespace + "." + view, ERROR_TYPE_NO_SUCH_VIEW, method, path);
                 return;
             }
-            String normalizedResponseJson = normalizeMetadataLocation(responseJson);
-            persistMetadataFile(normalizedResponseJson);
-            viewStore.putViewResponse(namespace, view, normalizedResponseJson);
-            sendJson(exchange, 200, normalizedResponseJson, method, path);
+            persistMetadataFile(responseJson);
+            viewStore.putViewResponse(namespace, view, responseJson);
+            sendJson(exchange, 200, responseJson, method, path);
         }
 
         private void handleListTables(HttpExchange exchange, String method, String path, String namespace, String query) throws IOException {
@@ -2109,18 +2231,17 @@ public class IcebergRestServer {
                 sendIcebergError(exchange, 409, "Table already exists: " + namespace + "." + tableName, method, path);
                 return;
             }
-            String normalizedResponseJson = normalizeMetadataLocation(loadTableResponseJson);
             boolean stageCreate = root.path("stage-create").asBoolean(false);
             if (!stageCreate) {
-                tableStore.putTableResponse(namespace, tableName, normalizedResponseJson);
-                IcebergRestServer.persistMetadataFile(normalizedResponseJson);
+                tableStore.putTableResponse(namespace, tableName, loadTableResponseJson);
+                IcebergRestServer.persistMetadataFile(loadTableResponseJson);
             }
-            sendJson(exchange, 200, normalizedResponseJson, method, path);
+            sendJson(exchange, 200, loadTableResponseJson, method, path);
         }
 
         private void handleReportMetrics(HttpExchange exchange, String method, String path, String namespace, String table) throws IOException {
             if (tableStore.getTableResponse(namespace, table) == null) {
-                sendIcebergError(exchange, 404, "Table not found: " + namespace + "." + table, method, path);
+                sendIcebergError(exchange, 404, "Table not found: " + namespace + "." + table, ERROR_TYPE_NO_SUCH_TABLE, method, path);
                 return;
             }
             String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
@@ -2143,7 +2264,7 @@ public class IcebergRestServer {
             try {
                 updatedResponseJson = tableStore.commitTable(namespace, table, requestBody);
             } catch (TableStore.TableNotFoundException e) {
-                sendIcebergError(exchange, 404, e.getMessage(), method, path);
+                sendIcebergError(exchange, 404, e.getMessage(), ERROR_TYPE_NO_SUCH_TABLE, method, path);
                 return;
             } catch (IllegalArgumentException e) {
                 sendIcebergError(exchange, 400, e.getMessage(), method, path);
@@ -2153,8 +2274,7 @@ public class IcebergRestServer {
                 return;
             }
 
-            String normalizedResponseJson = normalizeMetadataLocation(updatedResponseJson);
-            sendJson(exchange, 200, normalizedResponseJson, method, path);
+            sendJson(exchange, 200, updatedResponseJson, method, path);
         }
 
         private void handleCreateView(HttpExchange exchange, String method, String path, String namespace) throws IOException {
@@ -2185,13 +2305,12 @@ public class IcebergRestServer {
                 sendIcebergError(exchange, 409, "View already exists: " + namespace + "." + viewName, method, path);
                 return;
             }
-            String normalizedResponseJson = normalizeMetadataLocation(loadViewResponseJson);
             boolean stageCreate = root.path("stage-create").asBoolean(false);
             if (!stageCreate) {
-                viewStore.putViewResponse(namespace, viewName, normalizedResponseJson);
-                IcebergRestServer.persistMetadataFile(normalizedResponseJson);
+                viewStore.putViewResponse(namespace, viewName, loadViewResponseJson);
+                IcebergRestServer.persistMetadataFile(loadViewResponseJson);
             }
-            sendJson(exchange, 200, normalizedResponseJson, method, path);
+            sendJson(exchange, 200, loadViewResponseJson, method, path);
         }
 
         private void handleCommitView(HttpExchange exchange, String method, String path, String namespace, String view) throws IOException {
@@ -2201,7 +2320,7 @@ public class IcebergRestServer {
             try {
                 updatedResponseJson = viewStore.commitView(namespace, view, requestBody);
             } catch (ViewStore.ViewNotFoundException e) {
-                sendIcebergError(exchange, 404, e.getMessage(), method, path);
+                sendIcebergError(exchange, 404, e.getMessage(), ERROR_TYPE_NO_SUCH_VIEW, method, path);
                 return;
             } catch (IllegalArgumentException e) {
                 sendIcebergError(exchange, 400, e.getMessage(), method, path);
@@ -2211,8 +2330,7 @@ public class IcebergRestServer {
                 return;
             }
 
-            String normalizedResponseJson = normalizeMetadataLocation(updatedResponseJson);
-            sendJson(exchange, 200, normalizedResponseJson, method, path);
+            sendJson(exchange, 200, updatedResponseJson, method, path);
         }
 
         private void handleCreateNamespace(HttpExchange exchange, String method, String path) throws IOException {
@@ -2259,7 +2377,7 @@ public class IcebergRestServer {
 
         private void handleDeleteNamespace(HttpExchange exchange, String method, String path, String namespace) throws IOException {
             if (!namespaceStore.listNamespaces().contains(namespace)) {
-                sendIcebergError(exchange, 404, "Namespace not found: " + namespace, method, path);
+                sendIcebergError(exchange, 404, namespaceDoesNotExistMessage(namespace), ERROR_TYPE_NO_SUCH_NAMESPACE, method, path);
                 return;
             }
             if (!tableStore.listTables(namespace).isEmpty()) {
@@ -2286,7 +2404,7 @@ public class IcebergRestServer {
 
         private void handleDeleteTable(HttpExchange exchange, String method, String path, String namespace, String table) throws IOException {
             if (!tableStore.deleteTable(namespace, table)) {
-                sendIcebergError(exchange, 404, "Table not found: " + namespace + "." + table, method, path);
+                sendIcebergError(exchange, 404, "Table not found: " + namespace + "." + table, ERROR_TYPE_NO_SUCH_TABLE, method, path);
                 return;
             }
             sendNoContent(exchange, method, path);
@@ -2294,7 +2412,7 @@ public class IcebergRestServer {
 
         private void handleDeleteView(HttpExchange exchange, String method, String path, String namespace, String view) throws IOException {
             if (!viewStore.deleteView(namespace, view)) {
-                sendIcebergError(exchange, 404, "View not found: " + namespace + "." + view, method, path);
+                sendIcebergError(exchange, 404, "View not found: " + namespace + "." + view, ERROR_TYPE_NO_SUCH_VIEW, method, path);
                 return;
             }
             sendNoContent(exchange, method, path);
@@ -2321,11 +2439,12 @@ public class IcebergRestServer {
                 return;
             }
             if (!namespaceStore.listNamespaces().contains(sourceNamespace) || !namespaceStore.listNamespaces().contains(destinationNamespace)) {
-                sendIcebergError(exchange, 404, "Namespace not found", method, path);
+                String missing = !namespaceStore.listNamespaces().contains(sourceNamespace) ? sourceNamespace : destinationNamespace;
+                sendIcebergError(exchange, 404, namespaceDoesNotExistMessage(missing), ERROR_TYPE_NO_SUCH_NAMESPACE, method, path);
                 return;
             }
             if (!tableStore.renameTable(sourceNamespace, sourceName, destinationNamespace, destinationName)) {
-                sendIcebergError(exchange, 404, "Table not found: " + sourceNamespace + "." + sourceName, method, path);
+                sendIcebergError(exchange, 404, "Table not found: " + sourceNamespace + "." + sourceName, ERROR_TYPE_NO_SUCH_TABLE, method, path);
                 return;
             }
             sendNoContent(exchange, method, path);
@@ -2359,14 +2478,28 @@ public class IcebergRestServer {
                 String param = piece.substring(0, idx);
                 String value = piece.substring(idx + 1);
                 if (key.equals(param) && !value.isBlank()) {
-                    return value;
+                    try {
+                        return URLDecoder.decode(value, StandardCharsets.UTF_8);
+                    } catch (IllegalArgumentException e) {
+                        throw new IllegalArgumentException("Invalid query parameter encoding");
+                    }
                 }
             }
             return null;
         }
 
-        private String normalizeMetadataLocation(String loadTableResponseJson) {
-            return loadTableResponseJson;
+        private String decodeNamespacePath(String namespace) {
+            String decoded;
+            try {
+                decoded = URLDecoder.decode(namespace, StandardCharsets.UTF_8);
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("Invalid namespace path encoding");
+            }
+            return decoded.replace(String.valueOf(NAMESPACE_PART_SEPARATOR), ".");
+        }
+
+        private String namespaceDoesNotExistMessage(String namespace) {
+            return "Namespace does not exist: " + namespace;
         }
 
         private static String listNamespacesJson(String parent, String pageToken, Integer pageSize) {
@@ -2539,13 +2672,16 @@ public class IcebergRestServer {
             String method = exchange.getRequestMethod();
             String path = exchange.getRequestURI().getPath();
             System.out.println("Received " + method + " " + path);
-            sendIcebergError(exchange, 404, "Not Found", method, path);
+            sendIcebergError(exchange, 404, "Not Found", ERROR_TYPE_NOT_FOUND, method, path);
         }
     }
 
     private static void sendIcebergError(HttpExchange exchange, int statusCode, String message, String method, String path) throws IOException {
+        sendIcebergError(exchange, statusCode, message, errorTypeForStatus(statusCode), method, path);
+    }
+
+    private static void sendIcebergError(HttpExchange exchange, int statusCode, String message, String type, String method, String path) throws IOException {
         String escapedMessage = escapeJson(message);
-        String type = errorTypeForStatus(statusCode);
         String body = "{\"error\":{\"message\":\"" + escapedMessage + "\",\"type\":\"" + type + "\",\"code\":" + statusCode + "}}";
         sendJson(exchange, statusCode, body, method, path);
     }
@@ -2555,7 +2691,7 @@ public class IcebergRestServer {
             return "ServerErrorException";
         }
         if (statusCode == 404) {
-            return "NoSuchEntityException";
+            return ERROR_TYPE_NOT_FOUND;
         }
         if (statusCode == 409) {
             return "CommitFailedException";

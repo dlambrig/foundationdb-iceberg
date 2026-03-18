@@ -17,6 +17,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -494,6 +495,28 @@ class IcebergRestServerLogicTest {
     }
 
     @Test
+    void setDefaultSpecMinusOneSelectsLatestSpec() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[
+                {"id":1,"name":"order_id","required":false,"type":"long"},
+                {"id":2,"name":"order_date","required":false,"type":"date"}
+                ]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+        String commit = """
+                {
+                  "updates":[
+                    {"action":"add-spec","spec":{"spec-id":1,"fields":[{"source-id":2,"field-id":1000,"name":"order_day","transform":"day"}]}},
+                    {"action":"add-spec","spec":{"spec-id":2,"fields":[{"source-id":2,"field-id":1001,"name":"order_month","transform":"month"}]}},
+                    {"action":"set-default-spec","spec-id":-1}
+                  ]
+                }
+                """;
+        String updated = IcebergRestServer.applyCommitToTableResponseJson(base, commit);
+        assertEquals(2, MAPPER.readTree(updated).path("metadata").path("default-spec-id").asInt());
+    }
+
+    @Test
     void removePartitionSpecsEnforcesDefaultAndInUseProtections() throws Exception {
         String createRequest = """
                 {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[
@@ -626,6 +649,28 @@ class IcebergRestServerLogicTest {
                 IllegalArgumentException.class,
                 () -> IcebergRestServer.applyCommitToTableResponseJson(afterDefault, badSourceId));
         assertTrue(ex2.getMessage().contains("source-id does not exist"));
+    }
+
+    @Test
+    void setDefaultSortOrderMinusOneSelectsLatestSortOrder() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[
+                {"id":1,"name":"order_id","required":false,"type":"long"},
+                {"id":2,"name":"order_date","required":false,"type":"date"}
+                ]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+        String commit = """
+                {
+                  "updates":[
+                    {"action":"add-sort-order","sort-order":{"order-id":1,"fields":[{"source-id":1,"transform":"identity","direction":"asc","null-order":"nulls-last"}]}},
+                    {"action":"add-sort-order","sort-order":{"order-id":2,"fields":[{"source-id":2,"transform":"identity","direction":"desc","null-order":"nulls-first"}]}},
+                    {"action":"set-default-sort-order","sort-order-id":-1}
+                  ]
+                }
+                """;
+        String updated = IcebergRestServer.applyCommitToTableResponseJson(base, commit);
+        assertEquals(2, MAPPER.readTree(updated).path("metadata").path("default-sort-order-id").asInt());
     }
 
     @Test
@@ -1346,6 +1391,33 @@ class IcebergRestServerLogicTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void inMemoryCommitWithAssertCreateCreatesMissingTable() throws Exception {
+        InMemoryTableStore store = new InMemoryTableStore();
+        String commit = """
+                {
+                  "requirements":[{"type":"assert-create"}],
+                  "updates":[
+                    {"action":"assign-uuid","uuid":"11111111-1111-1111-1111-111111111111"},
+                    {"action":"add-schema","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":true,"type":"int"}]},"last-column-id":1},
+                    {"action":"set-current-schema","schema-id":-1},
+                    {"action":"add-spec","spec":{"spec-id":0,"fields":[]}},
+                    {"action":"set-default-spec","spec-id":-1},
+                    {"action":"add-sort-order","sort-order":{"order-id":0,"fields":[]}},
+                    {"action":"set-default-sort-order","sort-order-id":-1}
+                  ]
+                }
+                """;
+
+        String created = store.commitTable("sales", "orders", commit);
+        JsonNode metadata = MAPPER.readTree(created).path("metadata");
+        assertEquals("11111111-1111-1111-1111-111111111111", metadata.path("table-uuid").asText());
+        assertEquals(0, metadata.path("current-schema-id").asInt());
+        assertEquals(0, metadata.path("default-spec-id").asInt());
+        assertEquals(0, metadata.path("default-sort-order-id").asInt());
+        assertNotNull(store.getTableResponse("sales", "orders"));
     }
 
     @Test

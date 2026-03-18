@@ -75,8 +75,8 @@ class IcebergRestServerHttpTest {
         JsonNode error = MAPPER.readTree(response.body).path("error");
 
         assertEquals(404, error.path("code").asInt());
-        assertEquals("NoSuchEntityException", error.path("type").asText());
-        assertTrue(error.path("message").asText().contains("Namespace not found"));
+        assertEquals("NoSuchNamespaceException", error.path("type").asText());
+        assertTrue(error.path("message").asText().contains("Namespace does not exist"));
     }
 
     @Test
@@ -86,20 +86,20 @@ class IcebergRestServerHttpTest {
         assertErrorEnvelope("POST", "/v1/namespaces", "{\"namespace\":[],\"properties\":{}}", 400, "BadRequestException", "Invalid namespace");
         assertErrorEnvelope("POST", "/v1/namespaces", "{\"namespace\":[\"n1\"],\"properties\":\"bad\"}", 400, "BadRequestException", "Invalid properties");
 
-        assertErrorEnvelope("GET", "/v1/does-not-exist", null, 404, "NoSuchEntityException", "Not Found");
+        assertErrorEnvelope("GET", "/v1/does-not-exist", null, 404, "NotFoundException", "Not Found");
 
         assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}").statusCode);
 
         assertErrorEnvelope("POST", "/v1/namespaces/analytics/properties", "{\"updates\":{},\"removals\":\"bad\"}", 400, "BadRequestException", "Invalid properties update payload");
         assertErrorEnvelope("POST", "/v1/tables/rename", "{\"source\":{},\"destination\":{}}", 400, "BadRequestException", "Invalid rename payload");
-        assertErrorEnvelope("POST", "/v1/tables/rename", "{\"source\":{\"namespace\":[\"analytics\"],\"name\":\"a\"},\"destination\":{\"namespace\":[\"missing\"],\"name\":\"b\"}}", 404, "NoSuchEntityException", "Namespace not found");
+        assertErrorEnvelope("POST", "/v1/tables/rename", "{\"source\":{\"namespace\":[\"analytics\"],\"name\":\"a\"},\"destination\":{\"namespace\":[\"missing\"],\"name\":\"b\"}}", 404, "NoSuchNamespaceException", "Namespace does not exist");
 
         String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
         assertEquals(200, request("POST", "/v1/namespaces/analytics/tables", tableBody).statusCode);
 
         assertErrorEnvelope("POST", "/v1/namespaces/analytics/tables/orders", "{\"updates\":[{\"action\":\"unknown\"}]}", 400, "BadRequestException", "Unsupported update action");
         assertErrorEnvelope("POST", "/v1/namespaces/analytics/tables/orders", "{\"requirements\":[{\"type\":\"assert-create\"}],\"updates\":[]}", 409, "CommitFailedException", "assert-create failed");
-        assertErrorEnvelope("GET", "/v1/namespaces/analytics/tables/missing", null, 404, "NoSuchEntityException", "Table not found");
+        assertErrorEnvelope("GET", "/v1/namespaces/analytics/tables/missing", null, 404, "NoSuchTableException", "Table not found");
 
         String viewBody = """
                 {"name":"orders_v","view-version":{"version-id":1,"timestamp-ms":1700000000000,"schema-id":0},"schema":{"type":"struct","schema-id":0,"fields":[]}}
@@ -107,7 +107,7 @@ class IcebergRestServerHttpTest {
         assertEquals(200, request("POST", "/v1/namespaces/analytics/views", viewBody).statusCode);
         assertErrorEnvelope("POST", "/v1/namespaces/analytics/views", "{\"name\":\"bad\"}", 400, "BadRequestException", "Missing or invalid view-version");
         assertErrorEnvelope("POST", "/v1/namespaces/analytics/views/orders_v", "{\"updates\":[{\"action\":\"set-current-view-version\",\"version-id\":999}]}", 400, "BadRequestException", "unknown version-id");
-        assertErrorEnvelope("GET", "/v1/namespaces/analytics/views/missing", null, 404, "NoSuchEntityException", "View not found");
+        assertErrorEnvelope("GET", "/v1/namespaces/analytics/views/missing", null, 404, "NoSuchViewException", "View not found");
 
         assertErrorEnvelope("GET", "/v1/namespaces?page-size=0", null, 400, "BadRequestException", "Invalid page-size");
         assertErrorEnvelope("GET", "/v1/namespaces?page-token=missing", null, 400, "BadRequestException", "Invalid page-token");
@@ -474,7 +474,7 @@ class IcebergRestServerHttpTest {
 
         HttpResponse missingTable = request("POST", "/v1/namespaces/analytics/tables/missing/metrics", commitReport);
         assertEquals(404, missingTable.statusCode);
-        assertEquals("NoSuchEntityException", MAPPER.readTree(missingTable.body).path("error").path("type").asText());
+        assertEquals("NoSuchTableException", MAPPER.readTree(missingTable.body).path("error").path("type").asText());
 
         HttpResponse badJson = request("POST", "/v1/namespaces/analytics/tables/orders/metrics", "{\"report-type\"");
         assertEquals(400, badJson.statusCode);
@@ -706,7 +706,13 @@ class IcebergRestServerHttpTest {
                 "/v1/namespaces/nope/tables",
                 "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[]}}");
         assertEquals(404, missingNamespaceTableCreate.statusCode);
-        assertEquals(404, MAPPER.readTree(missingNamespaceTableCreate.body).path("error").path("code").asInt());
+        JsonNode missingNsCreateError = MAPPER.readTree(missingNamespaceTableCreate.body).path("error");
+        assertEquals(404, missingNsCreateError.path("code").asInt());
+        assertEquals("NoSuchNamespaceException", missingNsCreateError.path("type").asText());
+
+        HttpResponse missingNamespaceTableGet = request("GET", "/v1/namespaces/nope/tables/unknown", null);
+        assertEquals(404, missingNamespaceTableGet.statusCode);
+        assertEquals("NoSuchTableException", MAPPER.readTree(missingNamespaceTableGet.body).path("error").path("type").asText());
 
         request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
         HttpResponse missingTableGet = request("GET", "/v1/namespaces/analytics/tables/unknown", null);
@@ -778,6 +784,44 @@ class IcebergRestServerHttpTest {
         assertEquals(200, getNs.statusCode);
         JsonNode props = MAPPER.readTree(getNs.body).path("properties");
         assertEquals("gold", props.path("tier").asText());
+    }
+
+    @Test
+    void updateNamespacePropertiesMissingNamespaceReturnsNoSuchNamespace() throws Exception {
+        HttpResponse update = request("POST", "/v1/namespaces/missing/properties", "{\"updates\":{},\"removals\":[]}");
+        assertEquals(404, update.statusCode);
+        JsonNode error = MAPPER.readTree(update.body).path("error");
+        assertEquals("NoSuchNamespaceException", error.path("type").asText());
+        assertTrue(error.path("message").asText().contains("Namespace does not exist"));
+    }
+
+    @Test
+    void encodedNestedNamespacePathIsSupported() throws Exception {
+        assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\",\"sales\"],\"properties\":{}}").statusCode);
+
+        HttpResponse get = request("GET", "/v1/namespaces/analytics%1Fsales", null);
+        assertEquals(200, get.statusCode);
+
+        HttpResponse update = request("POST", "/v1/namespaces/analytics%1Fsales/properties", "{\"updates\":{\"tier\":\"gold\"},\"removals\":[]}");
+        assertEquals(200, update.statusCode);
+
+        HttpResponse tableNotFound = request("GET", "/v1/namespaces/analytics%1Fsales/tables/missing", null);
+        assertEquals(404, tableNotFound.statusCode);
+        assertEquals("NoSuchTableException", MAPPER.readTree(tableNotFound.body).path("error").path("type").asText());
+    }
+
+    @Test
+    void namespaceContainingSlashIsAddressableByPath() throws Exception {
+        assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"new/db\"],\"properties\":{}}").statusCode);
+
+        HttpResponse get = request("GET", "/v1/namespaces/new/db", null);
+        assertEquals(200, get.statusCode);
+
+        HttpResponse update = request("POST", "/v1/namespaces/new/db/properties", "{\"updates\":{\"k\":\"v\"},\"removals\":[]}");
+        assertEquals(200, update.statusCode);
+
+        HttpResponse listTables = request("GET", "/v1/namespaces/new/db/tables", null);
+        assertEquals(200, listTables.statusCode);
     }
 
     @Test
