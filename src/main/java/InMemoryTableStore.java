@@ -25,20 +25,18 @@ class InMemoryTableStore implements TableStore {
     @Override
     public synchronized String commitTable(String namespace, String table, String commitRequestBody) {
         String currentMetadataLocation = tableMetadataLocations.get(key(namespace, table));
-        if (currentMetadataLocation == null) {
-            if (!IcebergRestServer.hasAssertCreateRequirement(commitRequestBody)) {
-                throw new TableStore.TableNotFoundException("Table not found: " + namespace + "." + table);
-            }
-            String initialResponseJson = IcebergRestServer.buildEmptyTableResponseJson(namespace, table);
-            String createdResponseJson = IcebergRestServer.applyCommitToTableResponseJson(initialResponseJson, commitRequestBody);
-            String createdMetadataLocation = IcebergRestServer.extractMetadataLocation(createdResponseJson);
-            IcebergRestServer.persistMetadataFile(createdResponseJson);
-            tableMetadataLocations.put(key(namespace, table), createdMetadataLocation);
-            return createdResponseJson;
+        boolean tableExists = currentMetadataLocation != null;
+        if (!tableExists && !IcebergRestServer.hasAssertCreateRequirement(commitRequestBody)) {
+            throw new TableStore.TableNotFoundException("Table not found: " + namespace + "." + table);
         }
-        String existingResponseJson = IcebergRestServer.loadTableResponseFromMetadataLocation(currentMetadataLocation);
-        String updatedResponseJson = IcebergRestServer.applyCommitToTableResponseJson(existingResponseJson, commitRequestBody);
-        List<String> metadataFilesToDelete = IcebergRestServer.collectMetadataFilesToDeleteAfterCommit(existingResponseJson, updatedResponseJson);
+
+        String existingResponseJson = tableExists
+                ? IcebergRestServer.loadTableResponseFromMetadataLocation(currentMetadataLocation)
+                : IcebergRestServer.buildEmptyTableResponseJson(namespace, table);
+        String updatedResponseJson = IcebergRestServer.applyCommitToTableResponseJson(existingResponseJson, commitRequestBody, tableExists);
+        List<String> metadataFilesToDelete = tableExists
+                ? IcebergRestServer.collectMetadataFilesToDeleteAfterCommit(existingResponseJson, updatedResponseJson)
+                : List.of();
         String updatedMetadataLocation = IcebergRestServer.extractMetadataLocation(updatedResponseJson);
         IcebergRestServer.persistMetadataFile(updatedResponseJson);
         tableMetadataLocations.put(key(namespace, table), updatedMetadataLocation);

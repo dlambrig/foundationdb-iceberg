@@ -882,6 +882,34 @@ class IcebergRestServerHttpTest {
     }
 
     @Test
+    void stagedCreateCanBeCommittedViaAssertCreate() throws Exception {
+        assertEquals(200, request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}").statusCode);
+        String stagedBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]},\"stage-create\":true}";
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables", stagedBody).statusCode);
+        assertEquals(404, request("GET", "/v1/namespaces/analytics/tables/orders", null).statusCode);
+
+        String commitBody = """
+                {
+                  "requirements":[{"type":"assert-create"}],
+                  "updates":[
+                    {"action":"add-schema","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":false,"type":"long"}]},"last-column-id":1},
+                    {"action":"set-current-schema","schema-id":0},
+                    {"action":"set-properties","updates":{"owner":"analytics-team"}}
+                  ]
+                }
+                """;
+        HttpResponse commitResponse = request("POST", "/v1/namespaces/analytics/tables/orders", commitBody);
+        assertEquals(200, commitResponse.statusCode);
+
+        HttpResponse getResponse = request("GET", "/v1/namespaces/analytics/tables/orders", null);
+        assertEquals(200, getResponse.statusCode);
+        JsonNode metadata = MAPPER.readTree(getResponse.body).path("metadata");
+        assertEquals("analytics-team", metadata.path("properties").path("owner").asText());
+        assertEquals(1, metadata.path("schemas").size());
+        assertEquals(0, metadata.path("current-schema-id").asInt());
+    }
+
+    @Test
     void getTableReflectsCommittedMetadataChanges() throws Exception {
         request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
         String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
