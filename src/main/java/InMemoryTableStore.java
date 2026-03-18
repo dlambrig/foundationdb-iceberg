@@ -26,7 +26,15 @@ class InMemoryTableStore implements TableStore {
     public synchronized String commitTable(String namespace, String table, String commitRequestBody) {
         String currentMetadataLocation = tableMetadataLocations.get(key(namespace, table));
         if (currentMetadataLocation == null) {
-            throw new TableStore.TableNotFoundException("Table not found: " + namespace + "." + table);
+            if (!IcebergRestServer.hasAssertCreateRequirement(commitRequestBody)) {
+                throw new TableStore.TableNotFoundException("Table not found: " + namespace + "." + table);
+            }
+            String initialResponseJson = IcebergRestServer.buildEmptyTableResponseJson(namespace, table);
+            String createdResponseJson = IcebergRestServer.applyCommitToTableResponseJson(initialResponseJson, commitRequestBody);
+            String createdMetadataLocation = IcebergRestServer.extractMetadataLocation(createdResponseJson);
+            IcebergRestServer.persistMetadataFile(createdResponseJson);
+            tableMetadataLocations.put(key(namespace, table), createdMetadataLocation);
+            return createdResponseJson;
         }
         String existingResponseJson = IcebergRestServer.loadTableResponseFromMetadataLocation(currentMetadataLocation);
         String updatedResponseJson = IcebergRestServer.applyCommitToTableResponseJson(existingResponseJson, commitRequestBody);

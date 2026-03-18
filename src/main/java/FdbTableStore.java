@@ -48,7 +48,15 @@ class FdbTableStore implements TableStore {
             byte[] key = Tuple.from("iceberg-rest-server", "table", namespace, table).pack();
             byte[] existing = context.ensureActive().get(key).join();
             if (existing == null) {
-                throw new TableStore.TableNotFoundException("Table not found: " + namespace + "." + table);
+                if (!IcebergRestServer.hasAssertCreateRequirement(commitRequestBody)) {
+                    throw new TableStore.TableNotFoundException("Table not found: " + namespace + "." + table);
+                }
+                String initialResponseJson = IcebergRestServer.buildEmptyTableResponseJson(namespace, table);
+                String createdResponseJson = IcebergRestServer.applyCommitToTableResponseJson(initialResponseJson, commitRequestBody);
+                String createdMetadataLocation = IcebergRestServer.extractMetadataLocation(createdResponseJson);
+                IcebergRestServer.persistMetadataFile(createdResponseJson);
+                context.ensureActive().set(key, createdMetadataLocation.getBytes(StandardCharsets.UTF_8));
+                return createdResponseJson;
             }
 
             String currentMetadataLocation = new String(existing, StandardCharsets.UTF_8);
