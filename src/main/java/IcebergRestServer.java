@@ -20,6 +20,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.Iterator;
@@ -326,6 +327,7 @@ public class IcebergRestServer {
         if (currentMetadataLocation.isEmpty()) {
             throw new IllegalArgumentException("Stored table metadata-location is invalid");
         }
+        normalizeAndValidateMetadataChain(metadata, currentMetadataLocation, "table");
 
         validateCommitRequirements(commitRoot, metadata);
 
@@ -909,6 +911,7 @@ public class IcebergRestServer {
         if (currentMetadataLocation.isEmpty()) {
             throw new IllegalArgumentException("Stored view metadata-location is invalid");
         }
+        normalizeAndValidateMetadataChain(metadata, currentMetadataLocation, "view");
 
         validateViewCommitRequirements(commitRoot, metadata);
 
@@ -1112,6 +1115,105 @@ public class IcebergRestServer {
                 && (!defaultCatalogNode.isTextual() || defaultCatalogNode.asText("").isEmpty())) {
             throw new IllegalArgumentException("add-view-version default-catalog must be a non-empty string");
         }
+    }
+
+    private static void normalizeAndValidateMetadataChain(ObjectNode metadata, String currentMetadataLocation, String objectType) {
+        ArrayNode metadataLog = ensureArray(metadata, "metadata-log");
+        deduplicateMetadataLogEntries(metadataLog);
+
+        MetadataFileRef currentRef = parseMetadataFileRef(currentMetadataLocation, objectType + " metadata-location");
+        int previousVersion = -1;
+        Set<Integer> seenVersions = new HashSet<>();
+        List<MetadataFileRef> logRefs = new ArrayList<>();
+
+        for (int i = 0; i < metadataLog.size(); i++) {
+            JsonNode entry = metadataLog.get(i);
+            if (entry == null || !entry.isObject()) {
+                throw new IllegalArgumentException(objectType + " metadata-log entry must be object");
+            }
+            JsonNode timestampNode = entry.get("timestamp-ms");
+            if (timestampNode == null || !timestampNode.isIntegralNumber()) {
+                throw new IllegalArgumentException(objectType + " metadata-log entry requires integer timestamp-ms");
+            }
+            JsonNode metadataFileNode = entry.get("metadata-file");
+            if (metadataFileNode == null || !metadataFileNode.isTextual() || metadataFileNode.asText("").isEmpty()) {
+                throw new IllegalArgumentException(objectType + " metadata-log entry requires non-empty metadata-file");
+            }
+
+            String logLocation = metadataFileNode.asText();
+            MetadataFileRef ref = parseMetadataFileRef(logLocation, objectType + " metadata-log metadata-file");
+            if (logLocation.equals(currentMetadataLocation)) {
+                throw new IllegalArgumentException(objectType + " metadata-log cannot contain current metadata-location");
+            }
+            if (ref.version() >= currentRef.version()) {
+                throw new IllegalArgumentException(objectType + " metadata-log entry version must be older than current metadata-location");
+            }
+            if (!seenVersions.add(ref.version())) {
+                throw new IllegalArgumentException(objectType + " metadata-log contains duplicate metadata version: " + ref.version());
+            }
+            if (ref.version() <= previousVersion) {
+                throw new IllegalArgumentException(objectType + " metadata-log versions must be strictly increasing");
+            }
+            previousVersion = ref.version();
+            logRefs.add(ref);
+        }
+
+        if (currentRef.version() > 0 && !logRefs.isEmpty()) {
+            MetadataFileRef lastRef = logRefs.get(logRefs.size() - 1);
+            if (lastRef.version() != currentRef.version() - 1) {
+                throw new IllegalArgumentException(objectType + " metadata-log last entry must match previous metadata version");
+            }
+        }
+    }
+
+    private static void deduplicateMetadataLogEntries(ArrayNode metadataLog) {
+        if (metadataLog.isEmpty()) {
+            return;
+        }
+
+        Set<String> seenMetadataFiles = new LinkedHashSet<>();
+        List<JsonNode> deduped = new ArrayList<>();
+        for (JsonNode entry : metadataLog) {
+            if (entry != null && entry.isObject()) {
+                JsonNode metadataFileNode = entry.get("metadata-file");
+                if (metadataFileNode != null && metadataFileNode.isTextual()) {
+                    String metadataFile = metadataFileNode.asText("");
+                    if (!metadataFile.isEmpty() && seenMetadataFiles.contains(metadataFile)) {
+                        continue;
+                    }
+                    if (!metadataFile.isEmpty()) {
+                        seenMetadataFiles.add(metadataFile);
+                    }
+                }
+            }
+            deduped.add(entry);
+        }
+
+        metadataLog.removeAll();
+        for (JsonNode node : deduped) {
+            metadataLog.add(node);
+        }
+    }
+
+    private static MetadataFileRef parseMetadataFileRef(String metadataLocation, String context) {
+        try {
+            URI uri = URI.create(metadataLocation);
+            Path path = Paths.get(uri.getPath());
+            String fileName = path.getFileName().toString();
+            Matcher matcher = METADATA_FILE_PATTERN.matcher(fileName);
+            if (!matcher.matches()) {
+                throw new IllegalArgumentException(context + " has invalid metadata file name: " + fileName);
+            }
+            return new MetadataFileRef(Integer.parseInt(matcher.group(1)), metadataLocation);
+        } catch (Exception e) {
+            if (e instanceof IllegalArgumentException) {
+                throw (IllegalArgumentException) e;
+            }
+            throw new IllegalArgumentException(context + " is invalid: " + metadataLocation);
+        }
+    }
+
+    private record MetadataFileRef(int version, String location) {
     }
 
     private static void validateCommitRequirements(JsonNode commitRoot, ObjectNode metadata) {

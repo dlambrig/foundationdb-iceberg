@@ -1,5 +1,7 @@
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
@@ -1343,6 +1345,61 @@ class IcebergRestServerLogicTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void commitRejectsMalformedMetadataLogChain() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+        JsonNode baseRoot = MAPPER.readTree(base);
+        ObjectNode rootObj = (ObjectNode) baseRoot;
+        ObjectNode metadata = (ObjectNode) rootObj.path("metadata");
+        ArrayNode metadataLog = metadata.putArray("metadata-log");
+        metadataLog.addObject()
+                .put("timestamp-ms", 1700000000000L)
+                .put("metadata-file", rootObj.path("metadata-location").asText());
+
+        String malformed = MAPPER.writeValueAsString(rootObj);
+        String commit = "{\"updates\":[]}";
+        IllegalArgumentException ex = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(malformed, commit));
+        assertTrue(ex.getMessage().contains("metadata-log cannot contain current metadata-location"));
+    }
+
+    @Test
+    void commitRepairsDuplicateMetadataLogEntriesAndAdvancesChain() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+        JsonNode baseRoot = MAPPER.readTree(base);
+        ObjectNode rootObj = (ObjectNode) baseRoot;
+        String currentLocation = rootObj.path("metadata-location").asText();
+        String uuid = currentLocation.replaceAll("^.*/\\d{5}-([^.]+)\\.metadata\\.json$", "$1");
+        String v2 = currentLocation.replace("/00000-" + uuid + ".metadata.json", "/00002-" + uuid + ".metadata.json");
+        rootObj.put("metadata-location", v2);
+
+        ObjectNode metadata = (ObjectNode) rootObj.path("metadata");
+        ArrayNode metadataLog = metadata.putArray("metadata-log");
+        metadataLog.addObject().put("timestamp-ms", 1700000000000L).put("metadata-file",
+                currentLocation.replace("/00000-" + uuid + ".metadata.json", "/00000-" + uuid + ".metadata.json"));
+        metadataLog.addObject().put("timestamp-ms", 1700000001000L).put("metadata-file",
+                currentLocation.replace("/00000-" + uuid + ".metadata.json", "/00001-" + uuid + ".metadata.json"));
+        metadataLog.addObject().put("timestamp-ms", 1700000002000L).put("metadata-file",
+                currentLocation.replace("/00000-" + uuid + ".metadata.json", "/00001-" + uuid + ".metadata.json"));
+
+        String commit = "{\"updates\":[]}";
+        String updated = IcebergRestServer.applyCommitToTableResponseJson(MAPPER.writeValueAsString(rootObj), commit);
+        JsonNode updatedRoot = MAPPER.readTree(updated);
+        JsonNode updatedLog = updatedRoot.path("metadata").path("metadata-log");
+        assertEquals(3, updatedLog.size());
+        assertEquals(
+                currentLocation.replace("/00000-" + uuid + ".metadata.json", "/00002-" + uuid + ".metadata.json"),
+                updatedLog.get(2).path("metadata-file").asText());
+        assertTrue(updatedRoot.path("metadata-location").asText().contains("/00003-" + uuid + ".metadata.json"));
     }
 
     @Test
