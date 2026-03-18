@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -1400,6 +1401,67 @@ class IcebergRestServerLogicTest {
                 currentLocation.replace("/00000-" + uuid + ".metadata.json", "/00002-" + uuid + ".metadata.json"),
                 updatedLog.get(2).path("metadata-file").asText());
         assertTrue(updatedRoot.path("metadata-location").asText().contains("/00003-" + uuid + ".metadata.json"));
+    }
+
+    @Test
+    void metadataRetentionPrunesMetadataLogWhenDeleteAfterCommitEnabled() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+
+        String commit1 = """
+                {"updates":[{"action":"set-properties","updates":{"write.metadata.delete-after-commit.enabled":"true","write.metadata.previous-versions-max":"1"}}]}
+                """;
+        String after1 = IcebergRestServer.applyCommitToTableResponseJson(base, commit1);
+        assertEquals(1, MAPPER.readTree(after1).path("metadata").path("metadata-log").size());
+
+        String commit2 = """
+                {"updates":[{"action":"set-properties","updates":{"owner":"data"}}]}
+                """;
+        String after2 = IcebergRestServer.applyCommitToTableResponseJson(after1, commit2);
+        assertEquals(1, MAPPER.readTree(after2).path("metadata").path("metadata-log").size());
+    }
+
+    @Test
+    void metadataRetentionDeletesPrunedMetadataFilesInTableStoreCommitPath() throws Exception {
+        InMemoryTableStore store = new InMemoryTableStore();
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+        IcebergRestServer.persistMetadataFile(base);
+        store.putTableResponse("sales", "orders", base);
+
+        String commit1 = """
+                {"updates":[{"action":"set-properties","updates":{"write.metadata.delete-after-commit.enabled":"true","write.metadata.previous-versions-max":"1"}}]}
+                """;
+        String after1 = store.commitTable("sales", "orders", commit1);
+        JsonNode after1Root = MAPPER.readTree(after1);
+        String metadataFile00000 = after1Root.path("metadata").path("metadata-log").get(0).path("metadata-file").asText();
+        Path metadataPath00000 = IcebergRestServer.resolveWritablePath(metadataFile00000);
+        assertTrue(Files.exists(metadataPath00000));
+
+        String commit2 = """
+                {"updates":[{"action":"set-properties","updates":{"owner":"analytics"}}]}
+                """;
+        store.commitTable("sales", "orders", commit2);
+        assertTrue(Files.notExists(metadataPath00000));
+    }
+
+    @Test
+    void metadataRetentionRejectsNegativePreviousVersionsMax() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+        String commit = """
+                {"updates":[{"action":"set-properties","updates":{"write.metadata.delete-after-commit.enabled":"true","write.metadata.previous-versions-max":"-1"}}]}
+                """;
+        IllegalArgumentException ex = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(base, commit));
+        assertTrue(ex.getMessage().contains("write.metadata.previous-versions-max must be >= 0"));
     }
 
     @Test

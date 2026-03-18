@@ -54,9 +54,11 @@ class FdbTableStore implements TableStore {
             String currentMetadataLocation = new String(existing, StandardCharsets.UTF_8);
             String existingResponseJson = IcebergRestServer.loadTableResponseFromMetadataLocation(currentMetadataLocation);
             String updatedResponseJson = IcebergRestServer.applyCommitToTableResponseJson(existingResponseJson, commitRequestBody);
+            List<String> metadataFilesToDelete = IcebergRestServer.collectMetadataFilesToDeleteAfterCommit(existingResponseJson, updatedResponseJson);
             String updatedMetadataLocation = IcebergRestServer.extractMetadataLocation(updatedResponseJson);
             IcebergRestServer.persistMetadataFile(updatedResponseJson);
             context.ensureActive().set(key, updatedMetadataLocation.getBytes(StandardCharsets.UTF_8));
+            IcebergRestServer.deleteMetadataFilesQuietly(metadataFilesToDelete);
             return updatedResponseJson;
         });
     }

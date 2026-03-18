@@ -41,6 +41,9 @@ public class IcebergRestServer {
     private static final Path DEFAULT_LOCAL_ROOT = Paths.get(System.getProperty("java.io.tmpdir"));
     private static final String DEFAULT_WAREHOUSE_LOCATION = "local:///iceberg_warehouse";
     private static final Pattern METADATA_FILE_PATTERN = Pattern.compile("^(\\d+)-(.+)\\.metadata\\.json$");
+    private static final String WRITE_METADATA_DELETE_AFTER_COMMIT_ENABLED = "write.metadata.delete-after-commit.enabled";
+    private static final String WRITE_METADATA_PREVIOUS_VERSIONS_MAX = "write.metadata.previous-versions-max";
+    private static final int DEFAULT_PREVIOUS_VERSIONS_MAX = 100;
 
     private static NamespaceStore namespaceStore;
     private static TableStore tableStore;
@@ -879,6 +882,7 @@ public class IcebergRestServer {
         metadataLogEntry.put("timestamp-ms", now);
         metadataLogEntry.put("metadata-file", currentMetadataLocation);
         metadataLog.add(metadataLogEntry);
+        applyMetadataRetentionPolicy(metadata, metadataLog);
 
         String tableUuid = metadata.path("table-uuid").asText("");
         String nextMetadataLocation = nextMetadataLocation(currentMetadataLocation, tableUuid);
@@ -1115,6 +1119,56 @@ public class IcebergRestServer {
                 && (!defaultCatalogNode.isTextual() || defaultCatalogNode.asText("").isEmpty())) {
             throw new IllegalArgumentException("add-view-version default-catalog must be a non-empty string");
         }
+    }
+
+    private static void applyMetadataRetentionPolicy(ObjectNode metadata, ArrayNode metadataLog) {
+        JsonNode properties = metadata.path("properties");
+        if (!isMetadataDeleteAfterCommitEnabled(properties)) {
+            return;
+        }
+
+        int previousVersionsMax = parsePreviousVersionsMax(properties);
+        while (metadataLog.size() > previousVersionsMax) {
+            metadataLog.remove(0);
+        }
+    }
+
+    private static boolean isMetadataDeleteAfterCommitEnabled(JsonNode properties) {
+        if (properties == null || !properties.isObject()) {
+            return false;
+        }
+        String value = properties.path(WRITE_METADATA_DELETE_AFTER_COMMIT_ENABLED).asText("");
+        return "true".equalsIgnoreCase(value);
+    }
+
+    private static int parsePreviousVersionsMax(JsonNode properties) {
+        if (properties == null || !properties.isObject()) {
+            return DEFAULT_PREVIOUS_VERSIONS_MAX;
+        }
+
+        JsonNode node = properties.get(WRITE_METADATA_PREVIOUS_VERSIONS_MAX);
+        if (node == null || node.isNull() || node.asText("").isEmpty()) {
+            return DEFAULT_PREVIOUS_VERSIONS_MAX;
+        }
+        if (node.isIntegralNumber()) {
+            int value = node.asInt(Integer.MIN_VALUE);
+            if (value < 0) {
+                throw new IllegalArgumentException(WRITE_METADATA_PREVIOUS_VERSIONS_MAX + " must be >= 0");
+            }
+            return value;
+        }
+        if (node.isTextual()) {
+            try {
+                int value = Integer.parseInt(node.asText());
+                if (value < 0) {
+                    throw new IllegalArgumentException(WRITE_METADATA_PREVIOUS_VERSIONS_MAX + " must be >= 0");
+                }
+                return value;
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(WRITE_METADATA_PREVIOUS_VERSIONS_MAX + " must be an integer");
+            }
+        }
+        throw new IllegalArgumentException(WRITE_METADATA_PREVIOUS_VERSIONS_MAX + " must be an integer");
     }
 
     private static void normalizeAndValidateMetadataChain(ObjectNode metadata, String currentMetadataLocation, String objectType) {
@@ -1439,6 +1493,59 @@ public class IcebergRestServer {
         } catch (IOException e) {
             throw new RuntimeException("Failed to read metadata file: " + metadataLocation, e);
         }
+    }
+
+    static List<String> collectMetadataFilesToDeleteAfterCommit(String existingResponseJson, String updatedResponseJson) {
+        try {
+            JsonNode existingRoot = OBJECT_MAPPER.readTree(existingResponseJson);
+            JsonNode updatedRoot = OBJECT_MAPPER.readTree(updatedResponseJson);
+
+            if (!isMetadataDeleteAfterCommitEnabled(updatedRoot.path("metadata").path("properties"))) {
+                return Collections.emptyList();
+            }
+
+            Set<String> oldRefs = collectTrackedMetadataFiles(existingRoot);
+            Set<String> newRefs = collectTrackedMetadataFiles(updatedRoot);
+            oldRefs.removeAll(newRefs);
+            if (oldRefs.isEmpty()) {
+                return Collections.emptyList();
+            }
+            return new ArrayList<>(oldRefs);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Invalid JSON response payload");
+        }
+    }
+
+    static void deleteMetadataFilesQuietly(List<String> metadataLocations) {
+        for (String metadataLocation : metadataLocations) {
+            try {
+                Path metadataPath = resolveWritablePath(metadataLocation);
+                if (metadataPath != null) {
+                    Files.deleteIfExists(metadataPath);
+                }
+            } catch (Exception ignored) {
+                // Best-effort cleanup; commit metadata pointer changes must not be rolled back.
+            }
+        }
+    }
+
+    private static Set<String> collectTrackedMetadataFiles(JsonNode responseRoot) {
+        Set<String> refs = new LinkedHashSet<>();
+        String current = responseRoot.path("metadata-location").asText("");
+        if (!current.isEmpty()) {
+            refs.add(current);
+        }
+
+        JsonNode metadataLog = responseRoot.path("metadata").path("metadata-log");
+        if (metadataLog.isArray()) {
+            for (JsonNode entry : metadataLog) {
+                String metadataFile = entry.path("metadata-file").asText("");
+                if (!metadataFile.isEmpty()) {
+                    refs.add(metadataFile);
+                }
+            }
+        }
+        return refs;
     }
 
     private static String nextMetadataLocation(String currentMetadataLocation, String tableUuid) {

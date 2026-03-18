@@ -30,9 +30,11 @@ class InMemoryTableStore implements TableStore {
         }
         String existingResponseJson = IcebergRestServer.loadTableResponseFromMetadataLocation(currentMetadataLocation);
         String updatedResponseJson = IcebergRestServer.applyCommitToTableResponseJson(existingResponseJson, commitRequestBody);
+        List<String> metadataFilesToDelete = IcebergRestServer.collectMetadataFilesToDeleteAfterCommit(existingResponseJson, updatedResponseJson);
         String updatedMetadataLocation = IcebergRestServer.extractMetadataLocation(updatedResponseJson);
         IcebergRestServer.persistMetadataFile(updatedResponseJson);
         tableMetadataLocations.put(key(namespace, table), updatedMetadataLocation);
+        IcebergRestServer.deleteMetadataFilesQuietly(metadataFilesToDelete);
         return updatedResponseJson;
     }
 
