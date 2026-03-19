@@ -656,6 +656,9 @@ class IcebergRestServerLogicTest {
         String afterAdd = IcebergRestServer.applyCommitToTableResponseJson(base, addSortOrder);
         JsonNode metadataAfterAdd = MAPPER.readTree(afterAdd).path("metadata");
         assertEquals(2, metadataAfterAdd.path("sort-orders").size());
+        JsonNode addedSortField = metadataAfterAdd.path("sort-orders").get(1).path("fields").get(0);
+        assertEquals("asc", addedSortField.path("direction").asText());
+        assertEquals("nulls-last", addedSortField.path("null-order").asText());
 
         String setDefault = """
                 {"updates":[{"action":"set-default-sort-order","sort-order-id":1}]}
@@ -679,6 +682,38 @@ class IcebergRestServerLogicTest {
                 IllegalArgumentException.class,
                 () -> IcebergRestServer.applyCommitToTableResponseJson(afterDefault, badSourceId));
         assertTrue(ex2.getMessage().contains("source-id does not exist"));
+
+        String unsupportedUpdateField = """
+                {"updates":[{"action":"set-default-sort-order","sort-order-id":1,"unexpected":"x"}]}
+                """;
+        IllegalArgumentException ex3 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(afterDefault, unsupportedUpdateField));
+        assertTrue(ex3.getMessage().contains("set-default-sort-order has unsupported field"));
+
+        String unsupportedSortOrderField = """
+                {"updates":[{"action":"add-sort-order","sort-order":{"order-id":3,"fields":[],"extra":"x"}}]}
+                """;
+        IllegalArgumentException ex4 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(afterDefault, unsupportedSortOrderField));
+        assertTrue(ex4.getMessage().contains("sort-order has unsupported field"));
+
+        String unsupportedSortField = """
+                {"updates":[{"action":"add-sort-order","sort-order":{"order-id":3,"fields":[{"source-id":1,"transform":"identity","direction":"asc","null-order":"nulls-last","extra":"x"}]}}]}
+                """;
+        IllegalArgumentException ex5 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(afterDefault, unsupportedSortField));
+        assertTrue(ex5.getMessage().contains("add-sort-order field has unsupported field"));
+
+        String negativeOrderId = """
+                {"updates":[{"action":"add-sort-order","sort-order":{"order-id":-2,"fields":[]}}]}
+                """;
+        IllegalArgumentException ex6 = assertThrows(
+                IllegalArgumentException.class,
+                () -> IcebergRestServer.applyCommitToTableResponseJson(afterDefault, negativeOrderId));
+        assertTrue(ex6.getMessage().contains("requires integer order-id"));
     }
 
     @Test
@@ -695,6 +730,25 @@ class IcebergRestServerLogicTest {
                   "updates":[
                     {"action":"add-sort-order","sort-order":{"order-id":1,"fields":[{"source-id":1,"transform":"identity","direction":"asc","null-order":"nulls-last"}]}},
                     {"action":"add-sort-order","sort-order":{"order-id":2,"fields":[{"source-id":2,"transform":"identity","direction":"desc","null-order":"nulls-first"}]}},
+                    {"action":"set-default-sort-order","sort-order-id":-1}
+                  ]
+                }
+                """;
+        String updated = IcebergRestServer.applyCommitToTableResponseJson(base, commit);
+        assertEquals(2, MAPPER.readTree(updated).path("metadata").path("default-sort-order-id").asInt());
+    }
+
+    @Test
+    void setDefaultSortOrderMinusOneSelectsLastAddedNotMaxId() throws Exception {
+        String createRequest = """
+                {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
+                """;
+        String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
+        String commit = """
+                {
+                  "updates":[
+                    {"action":"add-sort-order","sort-order":{"order-id":10,"fields":[{"source-id":1,"transform":"identity","direction":"asc","null-order":"nulls-last"}]}},
+                    {"action":"add-sort-order","sort-order":{"order-id":2,"fields":[{"source-id":1,"transform":"identity","direction":"desc","null-order":"nulls-first"}]}},
                     {"action":"set-default-sort-order","sort-order-id":-1}
                   ]
                 }
