@@ -85,6 +85,59 @@ Use already-running Trino on `:8080`:
 ./integration/trino_smoke.sh --no-start-trino
 ```
 
+## Run Trino Connector Subset
+
+Run a focused Trino Iceberg connector subset (REST-focused default classes):
+
+```bash
+cd /Users/dlambrig/apple/foundationdb-iceberg
+./integration/run_trino_connector_subset.sh
+```
+
+Override tests:
+
+```bash
+./integration/run_trino_connector_subset.sh --tests "io.trino.plugin.iceberg.catalog.rest.TestIcebergRestCatalogSigV4Config"
+```
+
+Override Trino repo location:
+
+```bash
+./integration/run_trino_connector_subset.sh --trino-home /path/to/trino
+```
+
+Notes:
+- Default subset includes Testcontainers-based smoke tests and expects Docker to be running.
+- Logs are written under `integration/logs/trino_connector_subset_<timestamp>.log`.
+
+## Run Spark Smoke (Against foundationdb-iceberg)
+
+Run Spark SQL directly against this repo's REST server (`localhost:8181` by default):
+
+```bash
+cd /Users/dlambrig/apple/foundationdb-iceberg
+./integration/spark_smoke.sh
+```
+
+FDB-backed server mode:
+
+```bash
+./integration/spark_smoke.sh --fdb
+```
+
+Use existing server:
+
+```bash
+./integration/spark_smoke.sh --no-start-server
+```
+
+Notes:
+- This script requires `spark-sql`.
+- It requires an Iceberg Spark runtime jar (`iceberg-spark-runtime-<spark>_<scala>-*.jar`), looked up by default under:
+  - `~/iceberg/spark/v3.5/spark-runtime/build/libs/`
+- You can override via `ICEBERG_RUNTIME_JAR`.
+- Logs are written under `integration/logs/spark_smoke_<timestamp>.log`.
+
 ## Prerequisites
 
 - Trino source/build exists at `/Users/dlambrig/trino`

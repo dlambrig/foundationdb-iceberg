@@ -123,3 +123,16 @@ Latest observed result:
 - 18 skipped
 - 0 failures
 - 0 errors
+
+## Spark Compatibility Note
+
+- Running Spark tests inside `~/iceberg` is useful, but those tests usually use Iceberg's internal REST test harness by default.
+- To validate `foundationdb-iceberg` directly, Spark must be configured with:
+  - `type=rest`
+  - `uri=http://localhost:8181` (or `http://host.docker.internal:8181` from container)
+- Use this repo's direct Spark smoke script to test against your server:
+
+```bash
+cd /Users/dlambrig/apple/foundationdb-iceberg
+./integration/spark_smoke.sh
+```
