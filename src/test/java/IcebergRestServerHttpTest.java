@@ -441,6 +441,18 @@ class IcebergRestServerHttpTest {
                 "{\"updates\":[{\"action\":\"add-sort-order\",\"sort-order\":{\"order-id\":1,\"fields\":[{\"source-id\":1,\"transform\":\"identity\",\"direction\":\"up\",\"null-order\":\"nulls-last\"}]}}]}");
         assertEquals(400, malformedAddSortOrder.statusCode);
 
+        HttpResponse addSortOrderUnexpectedField = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"updates\":[{\"action\":\"add-sort-order\",\"sort-order\":{\"order-id\":1,\"fields\":[],\"extra\":\"x\"}}]}");
+        assertEquals(400, addSortOrderUnexpectedField.statusCode);
+
+        HttpResponse setDefaultSortOrderUnexpectedField = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"updates\":[{\"action\":\"set-default-sort-order\",\"sort-order-id\":0,\"unexpected\":true}]}");
+        assertEquals(400, setDefaultSortOrderUnexpectedField.statusCode);
+
         HttpResponse malformedAddEncryptionKey = request(
                 "POST",
                 "/v1/namespaces/analytics/tables/orders",
@@ -622,6 +634,14 @@ class IcebergRestServerHttpTest {
                 409,
                 "CommitFailedException",
                 "assert-current-schema-id failed");
+
+        assertErrorEnvelope(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                "{\"updates\":[{\"action\":\"set-default-sort-order\",\"sort-order-id\":0,\"unexpected\":true}]}",
+                400,
+                "BadRequestException",
+                "set-default-sort-order has unsupported field");
 
         assertErrorEnvelope(
                 "POST",
@@ -1035,6 +1055,29 @@ class IcebergRestServerHttpTest {
         assertTrue(metadata.path("properties").path("retention_days").isMissingNode());
         assertTrue(metadata.path("refs").has("main"));
         assertTrue(!metadata.path("refs").has("dev"));
+    }
+
+    @Test
+    void setDefaultSortOrderMinusOneUsesLastAddedOrder() throws Exception {
+        request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
+        String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables", tableBody).statusCode);
+
+        String commit = """
+                {
+                  "updates":[
+                    {"action":"add-sort-order","sort-order":{"order-id":10,"fields":[{"source-id":1,"transform":"identity","direction":"asc","null-order":"nulls-last"}]}},
+                    {"action":"add-sort-order","sort-order":{"order-id":2,"fields":[{"source-id":1,"transform":"identity","direction":"desc","null-order":"nulls-first"}]}},
+                    {"action":"set-default-sort-order","sort-order-id":-1}
+                  ]
+                }
+                """;
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables/orders", commit).statusCode);
+
+        HttpResponse get = request("GET", "/v1/namespaces/analytics/tables/orders", null);
+        assertEquals(200, get.statusCode);
+        JsonNode metadata = MAPPER.readTree(get.body).path("metadata");
+        assertEquals(2, metadata.path("default-sort-order-id").asInt());
     }
 
     private HttpResponse request(String method, String path, String body) throws Exception {

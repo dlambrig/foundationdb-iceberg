@@ -919,12 +919,14 @@ public class IcebergRestServer {
 
                 removeEntriesByIntId(schemas, "schema-id", removeSchemaIds);
             } else if ("add-sort-order".equals(action)) {
+                validateUpdateFields(updateNode, action, Set.of("sort-order"));
                 JsonNode sortOrderNode = updateNode.get("sort-order");
                 if (sortOrderNode == null || !sortOrderNode.isObject()) {
                     throw new IllegalArgumentException("add-sort-order requires sort-order object");
                 }
+                validateObjectFields(sortOrderNode, "add-sort-order sort-order", Set.of("order-id", "fields"));
                 int orderId = sortOrderNode.path("order-id").asInt(Integer.MIN_VALUE);
-                if (orderId == Integer.MIN_VALUE) {
+                if (orderId == Integer.MIN_VALUE || orderId < 0) {
                     throw new IllegalArgumentException("add-sort-order requires integer order-id");
                 }
                 ArrayNode sortOrders = ensureArray(metadata, "sort-orders");
@@ -943,6 +945,7 @@ public class IcebergRestServer {
                     if (!field.isObject()) {
                         throw new IllegalArgumentException("add-sort-order fields must contain objects");
                     }
+                    validateObjectFields(field, "add-sort-order field", Set.of("source-id", "transform", "direction", "null-order"));
                     int sourceId = field.path("source-id").asInt(Integer.MIN_VALUE);
                     String transform = field.path("transform").asText("");
                     String direction = field.path("direction").asText("");
@@ -961,8 +964,18 @@ public class IcebergRestServer {
                     }
                 }
 
-                sortOrders.add(sortOrderNode.deepCopy());
+                ObjectNode normalizedSortOrder = sortOrderNode.deepCopy();
+                ArrayNode normalizedFields = OBJECT_MAPPER.createArrayNode();
+                for (JsonNode field : fieldsNode) {
+                    ObjectNode normalized = field.deepCopy();
+                    normalized.put("direction", normalized.path("direction").asText("").toLowerCase());
+                    normalized.put("null-order", normalized.path("null-order").asText("").toLowerCase());
+                    normalizedFields.add(normalized);
+                }
+                normalizedSortOrder.set("fields", normalizedFields);
+                sortOrders.add(normalizedSortOrder);
             } else if ("set-default-sort-order".equals(action)) {
+                validateUpdateFields(updateNode, action, Set.of("sort-order-id"));
                 int sortOrderId = updateNode.path("sort-order-id").asInt(Integer.MIN_VALUE);
                 if (sortOrderId == Integer.MIN_VALUE) {
                     throw new IllegalArgumentException("set-default-sort-order requires integer sort-order-id");
@@ -970,11 +983,9 @@ public class IcebergRestServer {
                 ArrayNode sortOrders = ensureArray(metadata, "sort-orders");
                 if (sortOrderId == -1) {
                     int latestSortOrderId = Integer.MIN_VALUE;
-                    for (JsonNode existingOrder : sortOrders) {
-                        int candidate = existingOrder.path("order-id").asInt(Integer.MIN_VALUE);
-                        if (candidate > latestSortOrderId) {
-                            latestSortOrderId = candidate;
-                        }
+                    if (!sortOrders.isEmpty()) {
+                        JsonNode last = sortOrders.get(sortOrders.size() - 1);
+                        latestSortOrderId = last.path("order-id").asInt(Integer.MIN_VALUE);
                     }
                     if (latestSortOrderId == Integer.MIN_VALUE) {
                         throw new IllegalArgumentException("set-default-sort-order references unknown sort-order-id: -1");
@@ -1566,6 +1577,28 @@ public class IcebergRestServer {
             String fieldName = fieldNames.next();
             if (!allowed.contains(fieldName)) {
                 throw new IllegalArgumentException(requirementType + " has unsupported field: " + fieldName);
+            }
+        }
+    }
+
+    private static void validateUpdateFields(JsonNode update, String action, Set<String> allowedFields) {
+        Set<String> allowed = new HashSet<>(allowedFields);
+        allowed.add("action");
+        Iterator<String> fieldNames = update.fieldNames();
+        while (fieldNames.hasNext()) {
+            String fieldName = fieldNames.next();
+            if (!allowed.contains(fieldName)) {
+                throw new IllegalArgumentException(action + " has unsupported field: " + fieldName);
+            }
+        }
+    }
+
+    private static void validateObjectFields(JsonNode objectNode, String context, Set<String> allowedFields) {
+        Iterator<String> fieldNames = objectNode.fieldNames();
+        while (fieldNames.hasNext()) {
+            String fieldName = fieldNames.next();
+            if (!allowedFields.contains(fieldName)) {
+                throw new IllegalArgumentException(context + " has unsupported field: " + fieldName);
             }
         }
     }

@@ -107,3 +107,19 @@ Use `--fdb` for FoundationDB mode, `--no-start-server` for an existing server on
 
 ## Current Scope
 This is a prototype, not a full production Iceberg REST catalog implementation yet.
+
+## RCK Status
+
+As of March 18, 2026, the Iceberg Open API compatibility tests pass against this server:
+
+```bash
+cd ~/iceberg
+./gradlew :iceberg-open-api:test
+```
+
+Latest observed result:
+- 308 tests total
+- 290 passed
+- 18 skipped
+- 0 failures
+- 0 errors
