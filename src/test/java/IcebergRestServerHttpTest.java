@@ -47,6 +47,8 @@ class IcebergRestServerHttpTest {
         JsonNode root = MAPPER.readTree(response.body);
         assertTrue(root.has("defaults"));
         assertTrue(root.has("overrides"));
+        assertTrue(root.path("endpoints").isArray());
+        assertTrue(containsText(root.path("endpoints"), "POST /v1/{prefix}/namespaces/{namespace}/views"));
     }
 
     @Test
@@ -607,6 +609,35 @@ class IcebergRestServerHttpTest {
     }
 
     @Test
+    void commitAllowsRemovingAndRestoringMainRefWithinSingleRequest() throws Exception {
+        request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
+        String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
+        assertEquals(200, request("POST", "/v1/namespaces/analytics/tables", tableBody).statusCode);
+
+        HttpResponse seedSnapshot = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                """
+                {"updates":[
+                  {"action":"add-snapshot","snapshot":{"sequence-number":1,"snapshot-id":111,"timestamp-ms":1700000000000,"schema-id":0}},
+                  {"action":"set-snapshot-ref","ref-name":"main","snapshot-id":111,"type":"branch"}
+                ]}
+                """);
+        assertEquals(200, seedSnapshot.statusCode);
+
+        HttpResponse removeAndRestoreMainRef = request(
+                "POST",
+                "/v1/namespaces/analytics/tables/orders",
+                """
+                {"updates":[
+                  {"action":"remove-snapshot-ref","ref-name":"main"},
+                  {"action":"set-snapshot-ref","ref-name":"main","snapshot-id":111,"type":"branch"}
+                ]}
+                """);
+        assertEquals(200, removeAndRestoreMainRef.statusCode);
+    }
+
+    @Test
     void requirementFailureErrorEnvelopeMatrixIncludesStatusTypeCodeAndMessageClass() throws Exception {
         request("POST", "/v1/namespaces", "{\"namespace\":[\"analytics\"],\"properties\":{}}");
         String tableBody = "{\"name\":\"orders\",\"schema\":{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":false,\"type\":\"long\"}]}}";
@@ -1128,6 +1159,15 @@ class IcebergRestServerHttpTest {
         assertEquals(expectedCode, error.path("code").asInt());
         assertEquals(expectedType, error.path("type").asText());
         assertTrue(error.path("message").asText().contains(messageContains));
+    }
+
+    private boolean containsText(JsonNode arrayNode, String expected) {
+        for (JsonNode node : arrayNode) {
+            if (expected.equals(node.asText())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private record HttpResponse(int statusCode, String body) {}

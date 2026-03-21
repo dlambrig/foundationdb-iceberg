@@ -34,13 +34,31 @@ import java.util.concurrent.Executors;
 
 public class IcebergRestServer {
     private static final int PORT = 8181;
-    private static final String CONFIG_RESPONSE = "{\"defaults\":{},\"overrides\":{}}";
     private static final String TABLE_PATH_PREFIX = "/v1/namespaces/";
     private static final String TABLES_SEGMENT = "/tables";
     private static final String VIEWS_SEGMENT = "/views";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final Path DEFAULT_LOCAL_ROOT = Paths.get(System.getProperty("java.io.tmpdir"));
     private static final String DEFAULT_WAREHOUSE_LOCATION = "file:///tmp/iceberg_warehouse";
+    private static final List<String> SUPPORTED_ENDPOINTS = List.of(
+            "GET /v1/{prefix}/namespaces",
+            "POST /v1/{prefix}/namespaces",
+            "GET /v1/{prefix}/namespaces/{namespace}",
+            "DELETE /v1/{prefix}/namespaces/{namespace}",
+            "POST /v1/{prefix}/namespaces/{namespace}/properties",
+            "GET /v1/{prefix}/namespaces/{namespace}/tables",
+            "POST /v1/{prefix}/namespaces/{namespace}/tables",
+            "GET /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+            "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+            "DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+            "POST /v1/{prefix}/tables/rename",
+            "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics",
+            "GET /v1/{prefix}/namespaces/{namespace}/views",
+            "POST /v1/{prefix}/namespaces/{namespace}/views",
+            "GET /v1/{prefix}/namespaces/{namespace}/views/{view}",
+            "POST /v1/{prefix}/namespaces/{namespace}/views/{view}",
+            "DELETE /v1/{prefix}/namespaces/{namespace}/views/{view}");
+    private static final String CONFIG_RESPONSE = buildConfigResponseJson();
     private static final Pattern METADATA_FILE_PATTERN = Pattern.compile("^(\\d+)-(.+)\\.metadata\\.json$");
     private static final String WRITE_METADATA_DELETE_AFTER_COMMIT_ENABLED = "write.metadata.delete-after-commit.enabled";
     private static final String WRITE_METADATA_PREVIOUS_VERSIONS_MAX = "write.metadata.previous-versions-max";
@@ -97,6 +115,21 @@ public class IcebergRestServer {
         server.setExecutor(Executors.newFixedThreadPool(4));
         server.start();
         return server;
+    }
+
+    private static String buildConfigResponseJson() {
+        ObjectNode root = OBJECT_MAPPER.createObjectNode();
+        root.set("defaults", OBJECT_MAPPER.createObjectNode());
+        root.set("overrides", OBJECT_MAPPER.createObjectNode());
+        ArrayNode endpoints = root.putArray("endpoints");
+        for (String endpoint : SUPPORTED_ENDPOINTS) {
+            endpoints.add(endpoint);
+        }
+        try {
+            return OBJECT_MAPPER.writeValueAsString(root);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialize config response", e);
+        }
     }
 
     private static boolean isFdbEnabled(String[] args) {
@@ -476,7 +509,8 @@ public class IcebergRestServer {
         if (updatesNode == null || !updatesNode.isArray()) {
             throw new IllegalArgumentException("Missing or invalid updates");
         }
-        for (JsonNode updateNode : updatesNode) {
+        for (int updateIndex = 0; updateIndex < updatesNode.size(); updateIndex++) {
+            JsonNode updateNode = updatesNode.get(updateIndex);
             String action = updateNode.path("action").asText("");
             if (action.isEmpty()) {
                 throw new IllegalArgumentException("Missing update action");
@@ -590,7 +624,10 @@ public class IcebergRestServer {
                     throw new IllegalArgumentException("remove-snapshot-ref requires ref-name");
                 }
                 if ("main".equals(refName)) {
-                    throw new IllegalStateException("remove-snapshot-ref cannot remove required ref: main");
+                    if (!hasLaterSetSnapshotRefToMain(updatesNode, updateIndex + 1)) {
+                        throw new IllegalStateException("remove-snapshot-ref cannot remove required ref: main");
+                    }
+                    metadata.put("current-snapshot-id", -1);
                 }
                 if (!refs.has(refName)) {
                     throw new IllegalArgumentException("remove-snapshot-ref references unknown ref-name: " + refName);
@@ -1061,6 +1098,18 @@ public class IcebergRestServer {
         } catch (JsonProcessingException e) {
             throw new IllegalArgumentException("Failed to serialize updated table metadata");
         }
+    }
+
+    private static boolean hasLaterSetSnapshotRefToMain(JsonNode updatesNode, int startIndex) {
+        for (int i = startIndex; i < updatesNode.size(); i++) {
+            JsonNode candidate = updatesNode.get(i);
+            if ("set-snapshot-ref".equals(candidate.path("action").asText(""))
+                    && "main".equals(candidate.path("ref-name").asText(""))
+                    && candidate.path("snapshot-id").canConvertToLong()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static String applyCommitToViewResponseJson(String existingResponseJson, String commitRequestBody) {

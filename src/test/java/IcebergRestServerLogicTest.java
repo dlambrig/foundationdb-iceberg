@@ -867,6 +867,17 @@ class IcebergRestServerLogicTest {
                 IllegalStateException.class,
                 () -> IcebergRestServer.applyCommitToTableResponseJson(afterRemove, removeMain));
         assertTrue(ex2.getMessage().contains("cannot remove required ref: main"));
+
+        String removeAndRestoreMain = """
+                {"updates":[
+                  {"action":"remove-snapshot-ref","ref-name":"main"},
+                  {"action":"set-snapshot-ref","ref-name":"main","snapshot-id":101,"type":"branch"}
+                ]}
+                """;
+        String afterMainRoundTrip = IcebergRestServer.applyCommitToTableResponseJson(withRefs, removeAndRestoreMain);
+        JsonNode restoredRefs = MAPPER.readTree(afterMainRoundTrip).path("metadata").path("refs");
+        assertTrue(restoredRefs.has("main"));
+        assertEquals(101L, restoredRefs.path("main").path("snapshot-id").asLong());
     }
 
     @Test

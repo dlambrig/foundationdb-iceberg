@@ -131,6 +131,12 @@ Use existing server:
 ./integration/spark_smoke.sh --no-start-server
 ```
 
+Force the script to replace an unhealthy/conflicting local server on the same port:
+
+```bash
+./integration/spark_smoke.sh --replace-server
+```
+
 Run only selected scenarios:
 
 ```bash
@@ -142,12 +148,16 @@ Current scenarios:
 - `schema_evolution`: add column, insert with new schema, verify `DESCRIBE`
 - `overwrite`: append then `INSERT OVERWRITE`, verify final row set
 - `snapshots`: multiple commits, then query Spark snapshot/history metadata tables
+- `replace_table`: replace an existing table definition/data and verify the final row set
+- `views`: create/query/list/drop a view through the REST catalog
 
 Notes:
 - This script requires `spark-sql`.
 - It requires an Iceberg Spark runtime jar (`iceberg-spark-runtime-<spark>_<scala>-*.jar`), looked up by default under:
   - `~/iceberg/spark/v3.5/spark-runtime/build/libs/`
 - You can override via `ICEBERG_RUNTIME_JAR`.
+- If a healthy server is already listening at `REST_URI`, the script reuses it automatically.
+- If a conflicting listener exists but is not a healthy Iceberg REST server, use `--replace-server` to restart it.
 - Logs are written under `integration/logs/spark_smoke_<timestamp>.log`.
 - Per-scenario SQL files are written under `integration/logs/` for the duration of the run.
 

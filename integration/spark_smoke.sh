@@ -9,6 +9,7 @@ SPARK_LOG="${LOG_DIR}/spark_smoke_${RUN_ID}.log"
 SPARK_STATE_DIR="${LOG_DIR}/spark_state_${RUN_ID}"
 
 START_SERVER=true
+REPLACE_SERVER=false
 SERVER_MODE="memory"
 SERVER_GRADLE_ARGS=()
 
@@ -20,17 +21,18 @@ SCALA_VERSION="${SCALA_VERSION:-2.12}"
 CATALOG_NAME="${CATALOG_NAME:-rest}"
 WAREHOUSE_URI="${WAREHOUSE_URI:-file:///tmp/fdb_iceberg_spark_warehouse}"
 REST_URI="${REST_URI:-http://localhost:8181}"
-SCENARIOS="${SCENARIOS:-basic,schema_evolution,overwrite,snapshots}"
+SCENARIOS="${SCENARIOS:-basic,schema_evolution,overwrite,snapshots,replace_table,views}"
 
 usage() {
   cat <<'EOF'
-Usage: ./integration/spark_smoke.sh [--fdb] [--no-start-server] [--scenario name[,name...] ]
+Usage: ./integration/spark_smoke.sh [--fdb] [--no-start-server] [--replace-server] [--scenario name[,name...] ]
 
 Runs direct Spark SQL compatibility scenarios against foundationdb-iceberg REST server.
 
 Options:
   --fdb                     Start foundationdb-iceberg in FDB mode (-Dfdb=true).
   --no-start-server         Use existing server at REST_URI.
+  --replace-server          If a local server is already using REST_URI's port, stop it and start a fresh one.
   --scenario list           Comma-separated scenario names to run.
   -h, --help                Show help.
 
@@ -39,6 +41,8 @@ Available scenarios:
   schema_evolution
   overwrite
   snapshots
+  replace_table
+  views
 
 Environment overrides:
   SPARK_SQL_BIN             spark-sql binary path (default: spark-sql in PATH)
@@ -63,6 +67,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-start-server)
       START_SERVER=false
+      shift
+      ;;
+    --replace-server)
+      REPLACE_SERVER=true
       shift
       ;;
     --scenario)
@@ -102,16 +110,68 @@ cleanup() {
 }
 trap cleanup EXIT
 
-require_port_free() {
+rest_port() {
+  local rest_no_scheme host_port
+  rest_no_scheme="${REST_URI#*://}"
+  host_port="${rest_no_scheme%%/*}"
+  if [[ "${host_port}" == *:* ]]; then
+    printf '%s\n' "${host_port##*:}"
+  else
+    printf '80\n'
+  fi
+}
+
+list_port_pids() {
   local port="$1"
-  local name="$2"
-  local pids
-  pids="$(lsof -ti tcp:"${port}" || true)"
-  if [[ -n "${pids}" ]]; then
-    echo "ERROR: ${name} port ${port} is already in use by PID(s): ${pids}" >&2
-    echo "Stop existing process(es) first, or run: kill ${pids}" >&2
+  lsof -ti tcp:"${port}" 2>/dev/null || true
+}
+
+server_is_healthy() {
+  curl -sf "${REST_URI}/v1/config" >/dev/null 2>&1
+}
+
+spark_version_output() {
+  "${SPARK_SQL_BIN}" --version 2>&1
+}
+
+validate_spark_binary() {
+  local version_output spark_version_line scala_version_line
+  version_output="$(spark_version_output)"
+  spark_version_line="$(printf '%s\n' "${version_output}" | rg -m1 'version [0-9]+\.[0-9]+\.[0-9]+' || true)"
+  scala_version_line="$(printf '%s\n' "${version_output}" | rg -m1 'Scala version [0-9]+\.[0-9]+' || true)"
+
+  if [[ "${spark_version_line}" != *"version ${SPARK_VERSION}."* ]]; then
+    echo "ERROR: spark-sql version does not match SPARK_VERSION=${SPARK_VERSION}" >&2
+    echo "Detected: ${spark_version_line:-unknown}" >&2
+    echo "Set SPARK_SQL_BIN to a Spark ${SPARK_VERSION}.x binary." >&2
     exit 1
   fi
+
+  if [[ "${scala_version_line}" != *"Scala version ${SCALA_VERSION}."* ]]; then
+    echo "ERROR: spark-sql Scala version does not match SCALA_VERSION=${SCALA_VERSION}" >&2
+    echo "Detected: ${scala_version_line:-unknown}" >&2
+    echo "Set SPARK_SQL_BIN to a Spark build using Scala ${SCALA_VERSION}.x." >&2
+    exit 1
+  fi
+}
+
+stop_port_pids() {
+  local port="$1"
+  local pids
+  pids="$(list_port_pids "${port}")"
+  if [[ -z "${pids}" ]]; then
+    return 0
+  fi
+  echo "Replacing existing server on port ${port}: ${pids}"
+  kill ${pids} >/dev/null 2>&1 || true
+  for _ in {1..20}; do
+    if [[ -z "$(list_port_pids "${port}")" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "ERROR: Timed out waiting for existing process(es) on port ${port} to stop: ${pids}" >&2
+  exit 1
 }
 
 wait_for_http() {
@@ -149,6 +209,8 @@ if ! command -v "${SPARK_SQL_BIN}" >/dev/null 2>&1; then
   exit 1
 fi
 
+validate_spark_binary
+
 ICEBERG_RUNTIME_JAR="${ICEBERG_RUNTIME_JAR:-}"
 if [[ -z "${ICEBERG_RUNTIME_JAR}" ]]; then
   ICEBERG_RUNTIME_JAR="$(ls "${ICEBERG_HOME}/spark/v${SPARK_VERSION}/spark-runtime/build/libs"/iceberg-spark-runtime-${SPARK_VERSION}_${SCALA_VERSION}-*.jar 2>/dev/null | head -n1 || true)"
@@ -163,9 +225,7 @@ if [[ -z "${ICEBERG_RUNTIME_JAR}" || ! -f "${ICEBERG_RUNTIME_JAR}" ]]; then
   exit 1
 fi
 
-if [[ "${START_SERVER}" == "true" ]]; then
-  require_port_free 8181 "Server"
-fi
+REST_PORT="$(rest_port)"
 if [[ "${SERVER_MODE}" == "fdb" ]]; then
   require_fdb_prereqs
 fi
@@ -177,6 +237,23 @@ echo "Spark binary: ${SPARK_SQL_BIN}"
 echo "Iceberg runtime jar: ${ICEBERG_RUNTIME_JAR}"
 echo "Warehouse: ${WAREHOUSE_URI}"
 echo "Scenarios: ${SCENARIOS}"
+
+if [[ "${START_SERVER}" == "true" ]]; then
+  EXISTING_PIDS="$(list_port_pids "${REST_PORT}")"
+  if [[ -n "${EXISTING_PIDS}" ]]; then
+    if server_is_healthy; then
+      echo "Reusing existing server at ${REST_URI} (PID(s): ${EXISTING_PIDS})"
+      START_SERVER=false
+    elif [[ "${REPLACE_SERVER}" == "true" ]]; then
+      stop_port_pids "${REST_PORT}"
+    else
+      echo "ERROR: Server port ${REST_PORT} is already in use by PID(s): ${EXISTING_PIDS}" >&2
+      echo "The existing listener is not responding as a healthy Iceberg REST server at ${REST_URI}." >&2
+      echo "Use --replace-server to restart it, or stop the process(es) manually." >&2
+      exit 1
+    fi
+  fi
+fi
 
 if [[ "${START_SERVER}" == "true" ]]; then
   (
@@ -297,6 +374,42 @@ DROP NAMESPACE ${CATALOG_NAME}.${schema};")"
   assert_log_contains '(^|[[:space:]])2($|[[:space:]])' "Spark snapshots scenario did not produce expected snapshot/history counts."
 }
 
+run_replace_table_scenario() {
+  local schema="spark_replace_${RUN_ID}"
+  local table="orders"
+  local sql_file
+  sql_file="$(append_sql_file "replace_table" "CREATE NAMESPACE IF NOT EXISTS ${CATALOG_NAME}.${schema};
+CREATE TABLE ${CATALOG_NAME}.${schema}.${table} (order_id BIGINT, amount DOUBLE) USING iceberg;
+INSERT INTO ${CATALOG_NAME}.${schema}.${table} VALUES (1, 10.5), (2, 20.25);
+REPLACE TABLE ${CATALOG_NAME}.${schema}.${table} USING iceberg AS SELECT CAST(9 AS BIGINT) AS order_id, CAST(90.0 AS DOUBLE) AS amount;
+SELECT COUNT(*) AS replace_count FROM ${CATALOG_NAME}.${schema}.${table};
+SELECT MIN(order_id) AS min_order_id, MAX(order_id) AS max_order_id FROM ${CATALOG_NAME}.${schema}.${table};
+DROP TABLE ${CATALOG_NAME}.${schema}.${table};
+DROP NAMESPACE ${CATALOG_NAME}.${schema};")"
+  run_spark_sql "replace_table" "${sql_file}"
+  assert_log_contains '(^|[[:space:]])1($|[[:space:]])' "Spark replace-table scenario did not produce final COUNT(*) = 1."
+  assert_log_contains '^9[[:space:]]+9$' "Spark replace-table scenario did not preserve only the replacement row."
+}
+
+run_views_scenario() {
+  local schema="spark_views_${RUN_ID}"
+  local table="orders"
+  local view="orders_v"
+  local sql_file
+  sql_file="$(append_sql_file "views" "CREATE NAMESPACE IF NOT EXISTS ${CATALOG_NAME}.${schema};
+CREATE TABLE ${CATALOG_NAME}.${schema}.${table} (order_id BIGINT, amount DOUBLE) USING iceberg;
+INSERT INTO ${CATALOG_NAME}.${schema}.${table} VALUES (1, 10.5), (2, 20.25);
+CREATE VIEW ${CATALOG_NAME}.${schema}.${view} AS SELECT order_id, amount FROM ${CATALOG_NAME}.${schema}.${table};
+SELECT COUNT(*) AS view_count FROM ${CATALOG_NAME}.${schema}.${view};
+SHOW VIEWS IN ${CATALOG_NAME}.${schema};
+DROP VIEW ${CATALOG_NAME}.${schema}.${view};
+DROP TABLE ${CATALOG_NAME}.${schema}.${table};
+DROP NAMESPACE ${CATALOG_NAME}.${schema};")"
+  run_spark_sql "views" "${sql_file}"
+  assert_log_contains '(^|[[:space:]])2($|[[:space:]])' "Spark view scenario did not produce COUNT(*) = 2 from the view."
+  assert_log_contains "(^|[[:space:]])${view}([[:space:]]|$)" "Spark view scenario did not list the created view."
+}
+
 run_named_scenario() {
   local scenario="$1"
   case "${scenario}" in
@@ -311,6 +424,12 @@ run_named_scenario() {
       ;;
     snapshots)
       run_snapshots_scenario
+      ;;
+    replace_table)
+      run_replace_table_scenario
+      ;;
+    views)
+      run_views_scenario
       ;;
     *)
       echo "ERROR: Unknown scenario: ${scenario}" >&2
