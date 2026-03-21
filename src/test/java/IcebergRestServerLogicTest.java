@@ -40,8 +40,8 @@ class IcebergRestServerLogicTest {
         String metadataLocation = root.path("metadata-location").asText();
         String tableLocation = root.path("metadata").path("location").asText();
 
-        assertTrue(metadataLocation.startsWith("local:///iceberg_warehouse/_rest_metadata/"));
-        assertEquals("local:///iceberg_warehouse/sales/orders", tableLocation);
+        assertTrue(metadataLocation.startsWith("file:///tmp/iceberg_warehouse/_rest_metadata/"));
+        assertEquals("file:///tmp/iceberg_warehouse/sales/orders", tableLocation);
         assertEquals(2, root.path("metadata").path("format-version").asInt());
     }
 
@@ -91,8 +91,8 @@ class IcebergRestServerLogicTest {
         String metadataLocation = root.path("metadata-location").asText();
         String viewLocation = root.path("metadata").path("location").asText();
 
-        assertTrue(metadataLocation.startsWith("local:///iceberg_warehouse/_rest_metadata/"));
-        assertEquals("local:///iceberg_warehouse/sales/views/orders_view", viewLocation);
+        assertTrue(metadataLocation.startsWith("file:///tmp/iceberg_warehouse/_rest_metadata/"));
+        assertEquals("file:///tmp/iceberg_warehouse/sales/views/orders_view", viewLocation);
         assertEquals(1, root.path("metadata").path("format-version").asInt());
         assertTrue(root.path("metadata").has("view-uuid"));
         assertEquals(1, root.path("metadata").path("current-version-id").asInt());

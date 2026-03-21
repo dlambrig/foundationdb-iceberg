@@ -112,7 +112,7 @@ Notes:
 
 ## Run Spark Smoke (Against foundationdb-iceberg)
 
-Run Spark SQL directly against this repo's REST server (`localhost:8181` by default):
+Run Spark SQL scenarios directly against this repo's REST server (`localhost:8181` by default):
 
 ```bash
 cd /Users/dlambrig/apple/foundationdb-iceberg
@@ -131,12 +131,25 @@ Use existing server:
 ./integration/spark_smoke.sh --no-start-server
 ```
 
+Run only selected scenarios:
+
+```bash
+./integration/spark_smoke.sh --scenario basic,schema_evolution
+```
+
+Current scenarios:
+- `basic`: create namespace/table, insert, select, drop
+- `schema_evolution`: add column, insert with new schema, verify `DESCRIBE`
+- `overwrite`: append then `INSERT OVERWRITE`, verify final row set
+- `snapshots`: multiple commits, then query Spark snapshot/history metadata tables
+
 Notes:
 - This script requires `spark-sql`.
 - It requires an Iceberg Spark runtime jar (`iceberg-spark-runtime-<spark>_<scala>-*.jar`), looked up by default under:
   - `~/iceberg/spark/v3.5/spark-runtime/build/libs/`
 - You can override via `ICEBERG_RUNTIME_JAR`.
 - Logs are written under `integration/logs/spark_smoke_<timestamp>.log`.
+- Per-scenario SQL files are written under `integration/logs/` for the duration of the run.
 
 ## Prerequisites
 
