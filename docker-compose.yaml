@@ -1,0 +1,47 @@
+services:
+  fdb:
+    image: foundationdb/foundationdb:7.3.38
+    container_name: fdb_database
+    volumes:
+      - fdb_data:/var/fdb/data
+    networks:
+      - iceberg_net
+
+  iceberg-catalog:
+    build: .
+    container_name: fdb_iceberg_catalog
+    ports:
+      - "8181:8181"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - FDB_NETWORK_OPTIONS=TraceEnable
+    volumes:
+      - fdb_config:/etc/foundationdb
+    depends_on:
+      - fdb
+    networks:
+      - iceberg_net
+
+  spark-iceberg:
+    image: tabulario/spark-iceberg:latest
+    container_name: spark_client
+    stdin_open: true
+    tty: true
+    depends_on:
+      - iceberg-catalog
+    environment:
+      - SPARK_CONF_spark_sql_catalog_fdb=org.apache.iceberg.spark.SparkCatalog
+      - SPARK_CONF_spark_sql_catalog_fdb_type=rest
+      - SPARK_CONF_spark_sql_catalog_fdb_uri=http://iceberg-catalog:8181
+      - SPARK_CONF_spark_sql_catalog_fdb_warehouse=s3a://warehouse/
+      - SPARK_CONF_spark_sql_catalog_fdb_io__impl=org.apache.iceberg.aws.s3.S3FileIO
+    networks:
+      - iceberg_net
+
+volumes:
+  fdb_data:
+  fdb_config:
+
+networks:
+  iceberg_net:
+    driver: bridge
