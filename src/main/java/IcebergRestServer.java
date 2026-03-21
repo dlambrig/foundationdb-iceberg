@@ -40,7 +40,7 @@ public class IcebergRestServer {
     private static final String VIEWS_SEGMENT = "/views";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final Path DEFAULT_LOCAL_ROOT = Paths.get(System.getProperty("java.io.tmpdir"));
-    private static final String DEFAULT_WAREHOUSE_LOCATION = "local:///iceberg_warehouse";
+    private static final String DEFAULT_WAREHOUSE_LOCATION = "file:///tmp/iceberg_warehouse";
     private static final Pattern METADATA_FILE_PATTERN = Pattern.compile("^(\\d+)-(.+)\\.metadata\\.json$");
     private static final String WRITE_METADATA_DELETE_AFTER_COMMIT_ENABLED = "write.metadata.delete-after-commit.enabled";
     private static final String WRITE_METADATA_PREVIOUS_VERSIONS_MAX = "write.metadata.previous-versions-max";
@@ -2745,7 +2745,21 @@ public class IcebergRestServer {
         }
 
         JsonNode reportNode = root.get("report");
-        if (reportNode == null || !reportNode.isObject()) {
+        if (reportNode != null && !reportNode.isObject()) {
+            throw new IllegalArgumentException("Missing or invalid report");
+        }
+
+        boolean hasNestedReport = reportNode != null;
+        boolean hasFlatReportFields = false;
+        Iterator<String> fieldNames = root.fieldNames();
+        while (fieldNames.hasNext()) {
+            String fieldName = fieldNames.next();
+            if (!"report-type".equals(fieldName) && !"report".equals(fieldName)) {
+                hasFlatReportFields = true;
+                break;
+            }
+        }
+        if (!hasNestedReport && !hasFlatReportFields) {
             throw new IllegalArgumentException("Missing or invalid report");
         }
 

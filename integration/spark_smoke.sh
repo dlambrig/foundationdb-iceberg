@@ -6,7 +6,7 @@ LOG_DIR="${PROJECT_ROOT}/integration/logs"
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
 SERVER_LOG="${LOG_DIR}/spark_server_${RUN_ID}.log"
 SPARK_LOG="${LOG_DIR}/spark_smoke_${RUN_ID}.log"
-SQL_FILE="${LOG_DIR}/spark_smoke_${RUN_ID}.sql"
+SPARK_STATE_DIR="${LOG_DIR}/spark_state_${RUN_ID}"
 
 START_SERVER=true
 SERVER_MODE="memory"
@@ -20,28 +20,37 @@ SCALA_VERSION="${SCALA_VERSION:-2.12}"
 CATALOG_NAME="${CATALOG_NAME:-rest}"
 WAREHOUSE_URI="${WAREHOUSE_URI:-file:///tmp/fdb_iceberg_spark_warehouse}"
 REST_URI="${REST_URI:-http://localhost:8181}"
+SCENARIOS="${SCENARIOS:-basic,schema_evolution,overwrite,snapshots}"
 
 usage() {
   cat <<'EOF'
-Usage: ./integration/spark_smoke.sh [--fdb] [--no-start-server]
+Usage: ./integration/spark_smoke.sh [--fdb] [--no-start-server] [--scenario name[,name...] ]
 
-Runs a Spark SQL smoke flow directly against foundationdb-iceberg REST server.
+Runs direct Spark SQL compatibility scenarios against foundationdb-iceberg REST server.
 
 Options:
-  --fdb              Start foundationdb-iceberg in FDB mode (-Dfdb=true).
-  --no-start-server  Use existing server at REST_URI.
-  -h, --help         Show help.
+  --fdb                     Start foundationdb-iceberg in FDB mode (-Dfdb=true).
+  --no-start-server         Use existing server at REST_URI.
+  --scenario list           Comma-separated scenario names to run.
+  -h, --help                Show help.
+
+Available scenarios:
+  basic
+  schema_evolution
+  overwrite
+  snapshots
 
 Environment overrides:
-  SPARK_SQL_BIN      spark-sql binary path (default: spark-sql in PATH)
-  SPARK_MASTER       Spark master (default: local[2])
-  ICEBERG_HOME       Apache Iceberg repo path (default: /Users/dlambrig/iceberg)
-  SPARK_VERSION      Spark line for runtime jar lookup (default: 3.5)
-  SCALA_VERSION      Scala binary version for runtime jar lookup (default: 2.12)
-  CATALOG_NAME       Spark catalog name (default: rest)
-  WAREHOUSE_URI      Iceberg warehouse URI (default: file:///tmp/fdb_iceberg_spark_warehouse)
-  REST_URI           REST endpoint (default: http://localhost:8181)
-  ICEBERG_RUNTIME_JAR  Explicit iceberg-spark-runtime jar path override
+  SPARK_SQL_BIN             spark-sql binary path (default: spark-sql in PATH)
+  SPARK_MASTER              Spark master (default: local[2])
+  ICEBERG_HOME              Apache Iceberg repo path (default: /Users/dlambrig/iceberg)
+  SPARK_VERSION             Spark line for runtime jar lookup (default: 3.5)
+  SCALA_VERSION             Scala binary version for runtime jar lookup (default: 2.12)
+  CATALOG_NAME              Spark catalog name (default: rest)
+  WAREHOUSE_URI             Iceberg warehouse URI (default: file:///tmp/fdb_iceberg_spark_warehouse)
+  REST_URI                  REST endpoint (default: http://localhost:8181)
+  SCENARIOS                 Default scenario list if --scenario is omitted
+  ICEBERG_RUNTIME_JAR       Explicit iceberg-spark-runtime jar path override
 EOF
 }
 
@@ -56,6 +65,14 @@ while [[ $# -gt 0 ]]; do
       START_SERVER=false
       shift
       ;;
+    --scenario)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --scenario requires a value" >&2
+        exit 1
+      fi
+      SCENARIOS="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -69,15 +86,19 @@ while [[ $# -gt 0 ]]; do
 done
 
 mkdir -p "${LOG_DIR}"
+mkdir -p "${SPARK_STATE_DIR}"
 
 SERVER_PID=""
+SQL_FILES=()
 cleanup() {
   set +e
   if [[ -n "${SERVER_PID}" ]]; then
     kill "${SERVER_PID}" >/dev/null 2>&1 || true
     wait "${SERVER_PID}" >/dev/null 2>&1 || true
   fi
-  rm -f "${SQL_FILE}" >/dev/null 2>&1 || true
+  if [[ ${#SQL_FILES[@]} -gt 0 ]]; then
+    rm -f "${SQL_FILES[@]}" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
@@ -155,6 +176,7 @@ echo "REST URI: ${REST_URI}"
 echo "Spark binary: ${SPARK_SQL_BIN}"
 echo "Iceberg runtime jar: ${ICEBERG_RUNTIME_JAR}"
 echo "Warehouse: ${WAREHOUSE_URI}"
+echo "Scenarios: ${SCENARIOS}"
 
 if [[ "${START_SERVER}" == "true" ]]; then
   (
@@ -170,41 +192,150 @@ fi
 
 wait_for_http "${REST_URI}/v1/config" "Server"
 
-SCHEMA="spark_smoke_${RUN_ID}"
-TABLE="orders"
+append_sql_file() {
+  local scenario="$1"
+  local sql_contents="$2"
+  local sql_file="${LOG_DIR}/spark_${scenario}_${RUN_ID}.sql"
+  printf "%s\n" "${sql_contents}" > "${sql_file}"
+  SQL_FILES+=("${sql_file}")
+  printf "%s\n" "${sql_file}"
+}
 
-cat > "${SQL_FILE}" <<EOF
-CREATE NAMESPACE IF NOT EXISTS ${CATALOG_NAME}.${SCHEMA};
-CREATE TABLE ${CATALOG_NAME}.${SCHEMA}.${TABLE} (order_id BIGINT, amount DOUBLE) USING iceberg;
-INSERT INTO ${CATALOG_NAME}.${SCHEMA}.${TABLE} VALUES (1, 10.5), (2, 20.25);
-SELECT COUNT(*) AS c FROM ${CATALOG_NAME}.${SCHEMA}.${TABLE};
-SELECT * FROM ${CATALOG_NAME}.${SCHEMA}.${TABLE} ORDER BY order_id;
-DROP TABLE ${CATALOG_NAME}.${SCHEMA}.${TABLE};
-DROP NAMESPACE ${CATALOG_NAME}.${SCHEMA};
-EOF
+run_spark_sql() {
+  local scenario="$1"
+  local sql_file="$2"
+  echo "==> Running Spark scenario: ${scenario}" | tee -a "${SPARK_LOG}"
+  "${SPARK_SQL_BIN}" \
+    --master "${SPARK_MASTER}" \
+    --jars "${ICEBERG_RUNTIME_JAR}" \
+    --driver-java-options "-Dderby.system.home=${SPARK_STATE_DIR}" \
+    --conf "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions" \
+    --conf "spark.sql.catalog.${CATALOG_NAME}=org.apache.iceberg.spark.SparkCatalog" \
+    --conf "spark.sql.catalog.${CATALOG_NAME}.type=rest" \
+    --conf "spark.sql.catalog.${CATALOG_NAME}.uri=${REST_URI}" \
+    --conf "spark.sql.catalog.${CATALOG_NAME}.warehouse=${WAREHOUSE_URI}" \
+    --conf "spark.sql.warehouse.dir=${SPARK_STATE_DIR}/spark-warehouse" \
+    --conf "spark.sql.catalog.${CATALOG_NAME}.io-impl=org.apache.iceberg.hadoop.HadoopFileIO" \
+    -f "${sql_file}" >> "${SPARK_LOG}" 2>&1
+}
 
-echo "==> Running Spark SQL smoke commands"
-set -x
-"${SPARK_SQL_BIN}" \
-  --master "${SPARK_MASTER}" \
-  --jars "${ICEBERG_RUNTIME_JAR}" \
-  --conf "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions" \
-  --conf "spark.sql.catalog.${CATALOG_NAME}=org.apache.iceberg.spark.SparkCatalog" \
-  --conf "spark.sql.catalog.${CATALOG_NAME}.type=rest" \
-  --conf "spark.sql.catalog.${CATALOG_NAME}.uri=${REST_URI}" \
-  --conf "spark.sql.catalog.${CATALOG_NAME}.warehouse=${WAREHOUSE_URI}" \
-  --conf "spark.sql.catalog.${CATALOG_NAME}.io-impl=org.apache.iceberg.hadoop.HadoopFileIO" \
-  -f "${SQL_FILE}" | tee "${SPARK_LOG}"
-set +x
+assert_log_contains() {
+  local pattern="$1"
+  local message="$2"
+  if ! grep -Eq "${pattern}" "${SPARK_LOG}"; then
+    echo "ERROR: ${message}" >&2
+    echo "See log: ${SPARK_LOG}" >&2
+    exit 1
+  fi
+}
 
-if ! grep -Eq '(^|[[:space:]])2($|[[:space:]])' "${SPARK_LOG}"; then
-  echo "ERROR: Spark smoke did not produce expected COUNT(*) = 2 output." >&2
-  echo "See log: ${SPARK_LOG}" >&2
+run_basic_scenario() {
+  local schema="spark_basic_${RUN_ID}"
+  local table="orders"
+  local sql_file
+  sql_file="$(append_sql_file "basic" "CREATE NAMESPACE IF NOT EXISTS ${CATALOG_NAME}.${schema};
+CREATE TABLE ${CATALOG_NAME}.${schema}.${table} (order_id BIGINT, amount DOUBLE) USING iceberg;
+INSERT INTO ${CATALOG_NAME}.${schema}.${table} VALUES (1, 10.5), (2, 20.25);
+SELECT COUNT(*) AS basic_count FROM ${CATALOG_NAME}.${schema}.${table};
+SELECT * FROM ${CATALOG_NAME}.${schema}.${table} ORDER BY order_id;
+DROP TABLE ${CATALOG_NAME}.${schema}.${table};
+DROP NAMESPACE ${CATALOG_NAME}.${schema};")"
+  run_spark_sql "basic" "${sql_file}"
+  assert_log_contains '(^|[[:space:]])2($|[[:space:]])' "Spark basic scenario did not produce COUNT(*) = 2."
+  assert_log_contains '^1[[:space:]]+10\.5$' "Spark basic scenario did not print the first inserted row."
+  assert_log_contains '^2[[:space:]]+20\.25$' "Spark basic scenario did not print the second inserted row."
+}
+
+run_schema_evolution_scenario() {
+  local schema="spark_schema_${RUN_ID}"
+  local table="orders"
+  local sql_file
+  sql_file="$(append_sql_file "schema_evolution" "CREATE NAMESPACE IF NOT EXISTS ${CATALOG_NAME}.${schema};
+CREATE TABLE ${CATALOG_NAME}.${schema}.${table} (order_id BIGINT, amount DOUBLE) USING iceberg;
+INSERT INTO ${CATALOG_NAME}.${schema}.${table} VALUES (1, 10.5);
+ALTER TABLE ${CATALOG_NAME}.${schema}.${table} ADD COLUMNS (note STRING);
+INSERT INTO ${CATALOG_NAME}.${schema}.${table} VALUES (2, 20.25, 'after alter');
+SELECT COUNT(note) AS note_count FROM ${CATALOG_NAME}.${schema}.${table};
+DESCRIBE TABLE ${CATALOG_NAME}.${schema}.${table};
+DROP TABLE ${CATALOG_NAME}.${schema}.${table};
+DROP NAMESPACE ${CATALOG_NAME}.${schema};")"
+  run_spark_sql "schema_evolution" "${sql_file}"
+  assert_log_contains '(^|[[:space:]])1($|[[:space:]])' "Spark schema evolution scenario did not produce COUNT(note) = 1."
+  assert_log_contains 'note[[:space:]]+string' "Spark schema evolution scenario did not show the added note column."
+}
+
+run_overwrite_scenario() {
+  local schema="spark_overwrite_${RUN_ID}"
+  local table="orders"
+  local sql_file
+  sql_file="$(append_sql_file "overwrite" "CREATE NAMESPACE IF NOT EXISTS ${CATALOG_NAME}.${schema};
+CREATE TABLE ${CATALOG_NAME}.${schema}.${table} (order_id BIGINT, amount DOUBLE) USING iceberg;
+INSERT INTO ${CATALOG_NAME}.${schema}.${table} VALUES (1, 10.5), (2, 20.25);
+INSERT OVERWRITE ${CATALOG_NAME}.${schema}.${table} VALUES (9, 90.0);
+SELECT COUNT(*) AS overwrite_count FROM ${CATALOG_NAME}.${schema}.${table};
+SELECT MIN(order_id) AS min_order_id, MAX(order_id) AS max_order_id FROM ${CATALOG_NAME}.${schema}.${table};
+DROP TABLE ${CATALOG_NAME}.${schema}.${table};
+DROP NAMESPACE ${CATALOG_NAME}.${schema};")"
+  run_spark_sql "overwrite" "${sql_file}"
+  assert_log_contains '(^|[[:space:]])1($|[[:space:]])' "Spark overwrite scenario did not produce final COUNT(*) = 1."
+  assert_log_contains '^9[[:space:]]+9$' "Spark overwrite scenario did not preserve only the overwritten row."
+}
+
+run_snapshots_scenario() {
+  local schema="spark_snapshots_${RUN_ID}"
+  local table="orders"
+  local sql_file
+  sql_file="$(append_sql_file "snapshots" "CREATE NAMESPACE IF NOT EXISTS ${CATALOG_NAME}.${schema};
+CREATE TABLE ${CATALOG_NAME}.${schema}.${table} (order_id BIGINT, amount DOUBLE) USING iceberg;
+INSERT INTO ${CATALOG_NAME}.${schema}.${table} VALUES (1, 10.5);
+INSERT INTO ${CATALOG_NAME}.${schema}.${table} VALUES (2, 20.25);
+SELECT COUNT(*) AS snapshot_count FROM ${CATALOG_NAME}.${schema}.${table}.snapshots;
+SELECT COUNT(*) AS history_count FROM ${CATALOG_NAME}.${schema}.${table}.history;
+DROP TABLE ${CATALOG_NAME}.${schema}.${table};
+DROP NAMESPACE ${CATALOG_NAME}.${schema};")"
+  run_spark_sql "snapshots" "${sql_file}"
+  assert_log_contains '(^|[[:space:]])2($|[[:space:]])' "Spark snapshots scenario did not produce expected snapshot/history counts."
+}
+
+run_named_scenario() {
+  local scenario="$1"
+  case "${scenario}" in
+    basic)
+      run_basic_scenario
+      ;;
+    schema_evolution)
+      run_schema_evolution_scenario
+      ;;
+    overwrite)
+      run_overwrite_scenario
+      ;;
+    snapshots)
+      run_snapshots_scenario
+      ;;
+    *)
+      echo "ERROR: Unknown scenario: ${scenario}" >&2
+      exit 1
+      ;;
+  esac
+}
+
+IFS=',' read -r -a scenario_list <<< "${SCENARIOS}"
+if [[ ${#scenario_list[@]} -eq 0 ]]; then
+  echo "ERROR: No Spark scenarios selected." >&2
   exit 1
 fi
 
+: > "${SPARK_LOG}"
+for scenario in "${scenario_list[@]}"; do
+  trimmed="$(printf '%s' "${scenario}" | tr -d '[:space:]')"
+  if [[ -z "${trimmed}" ]]; then
+    continue
+  fi
+  run_named_scenario "${trimmed}"
+done
+
 echo
-echo "Spark smoke passed against foundationdb-iceberg."
+echo "Spark scenarios passed against foundationdb-iceberg."
 echo "Spark log: ${SPARK_LOG}"
 if [[ "${START_SERVER}" == "true" ]]; then
   echo "Server log: ${SERVER_LOG}"

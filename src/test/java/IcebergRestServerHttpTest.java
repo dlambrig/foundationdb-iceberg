@@ -484,6 +484,23 @@ class IcebergRestServerHttpTest {
         assertEquals(1, records.size());
         assertEquals("commit-report", records.get(0).reportType());
 
+        String flatCommitReport = """
+                {
+                  "report-type":"commit-report",
+                  "table-name":"orders",
+                  "snapshot-id":456,
+                  "sequence-number":2
+                }
+                """;
+        HttpResponse flatOk = request("POST", "/v1/namespaces/analytics/tables/orders/metrics", flatCommitReport);
+        assertEquals(204, flatOk.statusCode);
+        records = metricsStore.listTableMetrics("analytics", "orders");
+        assertEquals(2, records.size());
+        assertEquals("commit-report", records.get(1).reportType());
+        JsonNode flatRecordPayload = MAPPER.readTree(records.get(1).payloadJson());
+        assertEquals("orders", flatRecordPayload.path("table-name").asText());
+        assertEquals(456L, flatRecordPayload.path("snapshot-id").asLong());
+
         HttpResponse missingTable = request("POST", "/v1/namespaces/analytics/tables/missing/metrics", commitReport);
         assertEquals(404, missingTable.statusCode);
         assertEquals("NoSuchTableException", MAPPER.readTree(missingTable.body).path("error").path("type").asText());
