@@ -59,8 +59,10 @@ cd /Users/dlambrig/apple/foundationdb-iceberg
 This script:
 - runs `trino_smoke.sh --fdb` (unless `--no-smoke` is used)
 - starts `IcebergRestServer` in FDB mode
+- starts a fresh local Trino for direct FDB-backed checks (unless `--no-trino` is used)
 - validates metrics endpoint behavior pre/post restart
 - validates restart/reload behavior for both table and view metadata pointers
+- validates direct Trino write/restart/read behavior against the FDB-backed catalog, including table/view reload and `$snapshots` after restart
 - runs a direct Spark write/restart/read cycle against the FDB-backed catalog (unless `--no-spark` is used)
 - validates namespace/table/view pagination behavior via REST APIs
 - validates longer repeated concurrent writer conflict behavior (one commit succeeds, one conflicts per iteration)
@@ -71,6 +73,7 @@ Options:
 
 ```bash
 ./integration/run_fdb_integration.sh --no-smoke
+./integration/run_fdb_integration.sh --no-trino
 ./integration/run_fdb_integration.sh --no-spark
 ./integration/run_fdb_integration.sh --no-start-server
 ```

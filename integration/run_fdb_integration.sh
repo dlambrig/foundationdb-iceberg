@@ -5,6 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="${PROJECT_ROOT}/integration/logs"
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
 SERVER_LOG="${LOG_DIR}/fdb_server_${RUN_ID}.log"
+TRINO_LOG="${LOG_DIR}/fdb_trino_${RUN_ID}.log"
 SERVER_GRADLE_ARGS=(-Dfdb=true)
 CONCURRENT_ITERATIONS="${CONCURRENT_ITERATIONS:-20}"
 MIXED_CONFLICT_ITERATIONS="${MIXED_CONFLICT_ITERATIONS:-12}"
@@ -12,6 +13,7 @@ WRITE_CYCLE_ITERATIONS="${WRITE_CYCLE_ITERATIONS:-18}"
 
 START_SERVER=true
 RUN_SMOKE=true
+RUN_TRINO=true
 RUN_SPARK=true
 
 SPARK_SQL_BIN="${SPARK_SQL_BIN:-spark-sql}"
@@ -25,13 +27,21 @@ REST_URI="${REST_URI:-http://localhost:8181}"
 SPARK_LOG="${LOG_DIR}/fdb_spark_${RUN_ID}.log"
 SPARK_STATE_DIR="${LOG_DIR}/fdb_spark_state_${RUN_ID}"
 ICEBERG_RUNTIME_JAR="${ICEBERG_RUNTIME_JAR:-}"
+TRINO_HOME="${TRINO_HOME:-/Users/dlambrig/trino}"
+TRINO_SERVER_URL="${TRINO_SERVER_URL:-http://localhost:8080}"
+TRINO_ETC="${TRINO_ETC:-${TRINO_HOME}/etc}"
+TRINO_CLI_JAR="${TRINO_CLI_JAR:-}"
+TRINO_SERVER_DIR="${TRINO_SERVER_DIR:-}"
+TRINO_LAUNCHER="${TRINO_LAUNCHER:-}"
+TRINO_RUNTIME_ETC=""
 
 usage() {
   cat <<'EOF'
-Usage: ./integration/run_fdb_integration.sh [--no-smoke] [--no-spark] [--no-start-server]
+Usage: ./integration/run_fdb_integration.sh [--no-smoke] [--no-trino] [--no-spark] [--no-start-server]
 
 Options:
   --no-smoke         Skip ./integration/trino_smoke.sh --fdb pre-check.
+  --no-trino         Skip direct Trino write/restart/read checks.
   --no-spark         Skip direct Spark write/restart/read checks.
   --no-start-server  Use an already-running server on localhost:8181 for REST checks.
   -h                 Show help.
@@ -46,6 +56,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-spark)
       RUN_SPARK=false
+      shift
+      ;;
+    --no-trino)
+      RUN_TRINO=false
       shift
       ;;
     --no-start-server)
@@ -68,6 +82,7 @@ mkdir -p "${LOG_DIR}"
 mkdir -p "${SPARK_STATE_DIR}"
 
 SERVER_PID=""
+TRINO_PID=""
 
 cleanup() {
   set +e
@@ -75,14 +90,26 @@ cleanup() {
     kill "${SERVER_PID}" >/dev/null 2>&1 || true
     wait "${SERVER_PID}" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${TRINO_PID}" ]]; then
+    kill "${TRINO_PID}" >/dev/null 2>&1 || true
+    wait "${TRINO_PID}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${TRINO_RUNTIME_ETC}" ]]; then
+    rm -rf "${TRINO_RUNTIME_ETC}" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
+
+list_port_pids() {
+  local port="$1"
+  lsof -ti tcp:"${port}" 2>/dev/null || true
+}
 
 require_port_free() {
   local port="$1"
   local name="$2"
   local pids
-  pids="$(lsof -ti tcp:"${port}" || true)"
+  pids="$(list_port_pids "${port}")"
   if [[ -n "${pids}" ]]; then
     echo "ERROR: ${name} port ${port} is already in use by PID(s): ${pids}" >&2
     echo "Stop existing process(es) first, or run: kill ${pids}" >&2
@@ -93,11 +120,11 @@ require_port_free() {
 kill_port_processes() {
   local port="$1"
   local pids
-  pids="$(lsof -ti tcp:"${port}" || true)"
+  pids="$(list_port_pids "${port}")"
   if [[ -n "${pids}" ]]; then
     kill ${pids} >/dev/null 2>&1 || true
     sleep 1
-    pids="$(lsof -ti tcp:"${port}" || true)"
+    pids="$(list_port_pids "${port}")"
     if [[ -n "${pids}" ]]; then
       kill -9 ${pids} >/dev/null 2>&1 || true
     fi
@@ -116,6 +143,79 @@ wait_for_http() {
   done
   echo "ERROR: Timed out waiting for ${name}" >&2
   return 1
+}
+
+run_trino_sql_raw() {
+  local sql="$1"
+  java -jar "${TRINO_CLI_JAR}" --server "${TRINO_SERVER_URL}" --output-format TSV_HEADER --execute "${sql}"
+}
+
+wait_for_trino() {
+  for _ in {1..120}; do
+    if run_trino_sql_raw "SELECT 1" >/dev/null 2>&1; then
+      echo "Trino is ready"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "ERROR: Timed out waiting for Trino" >&2
+  return 1
+}
+
+prepare_trino_runtime_etc() {
+  TRINO_RUNTIME_ETC="${LOG_DIR}/trino_etc_${RUN_ID}"
+  rm -rf "${TRINO_RUNTIME_ETC}"
+  mkdir -p "${TRINO_RUNTIME_ETC}"
+  cp -R "${TRINO_ETC}/." "${TRINO_RUNTIME_ETC}/"
+
+  local iceberg_catalog="${TRINO_RUNTIME_ETC}/catalog/iceberg.properties"
+  if [[ ! -f "${iceberg_catalog}" ]]; then
+    echo "ERROR: Missing Iceberg catalog config: ${iceberg_catalog}" >&2
+    exit 1
+  fi
+
+  if rg -q '^local\.location=' "${iceberg_catalog}"; then
+    perl -0pi -e 's/^local\.location=.*/local.location=\//m' "${iceberg_catalog}"
+  else
+    printf '\nlocal.location=/\n' >> "${iceberg_catalog}"
+  fi
+}
+
+require_trino_prereqs() {
+  if [[ -z "${TRINO_CLI_JAR}" ]]; then
+    TRINO_CLI_JAR="$(ls "${TRINO_HOME}"/client/trino-cli/target/trino-cli-*-executable.jar 2>/dev/null | head -n1 || true)"
+  fi
+  if [[ -z "${TRINO_CLI_JAR}" || ! -f "${TRINO_CLI_JAR}" ]]; then
+    echo "ERROR: Unable to find trino-cli executable jar. Set TRINO_CLI_JAR." >&2
+    exit 1
+  fi
+
+  if [[ -z "${TRINO_SERVER_DIR}" ]]; then
+    TRINO_SERVER_DIR="$(ls -d "${TRINO_HOME}"/core/trino-server/target/trino-server-* 2>/dev/null | head -n1 || true)"
+  fi
+  if [[ -z "${TRINO_SERVER_DIR}" || ! -d "${TRINO_SERVER_DIR}" ]]; then
+    echo "ERROR: Unable to find Trino server directory. Set TRINO_SERVER_DIR." >&2
+    exit 1
+  fi
+
+  if [[ -z "${TRINO_LAUNCHER}" ]]; then
+    if [[ -x "${TRINO_SERVER_DIR}/bin/darwin-amd64/launcher" ]]; then
+      TRINO_LAUNCHER="${TRINO_SERVER_DIR}/bin/darwin-amd64/launcher"
+    elif [[ -x "${TRINO_SERVER_DIR}/bin/linux-amd64/launcher" ]]; then
+      TRINO_LAUNCHER="${TRINO_SERVER_DIR}/bin/linux-amd64/launcher"
+    elif [[ -x "${TRINO_SERVER_DIR}/bin/launcher" ]]; then
+      TRINO_LAUNCHER="${TRINO_SERVER_DIR}/bin/launcher"
+    fi
+  fi
+  if [[ -z "${TRINO_LAUNCHER}" || ! -x "${TRINO_LAUNCHER}" ]]; then
+    echo "ERROR: Unable to find Trino launcher. Set TRINO_LAUNCHER." >&2
+    exit 1
+  fi
+
+  if [[ ! -d "${TRINO_ETC}" ]]; then
+    echo "ERROR: TRINO_ETC does not exist: ${TRINO_ETC}" >&2
+    exit 1
+  fi
 }
 
 spark_version_output() {
@@ -226,6 +326,57 @@ EOF
   run_spark_sql_file "${reload_sql}"
   assert_spark_log_contains '(^|[[:space:]])2($|[[:space:]])' "Spark reload did not preserve expected table/view row counts after restart."
   assert_spark_log_contains '(^|[[:space:]])1($|[[:space:]])' "Spark reload did not show a snapshot count after restart."
+}
+
+run_trino_and_expect() {
+  local name="$1"
+  local sql="$2"
+  local expected="$3"
+  echo "==> ${name}"
+  local out
+  if ! out="$(run_trino_sql_raw "${sql}" 2>&1)"; then
+    echo "Trino SQL failed: ${sql}" >&2
+    echo "${out}" >&2
+    echo "See Trino log: ${TRINO_LOG}" >&2
+    exit 1
+  fi
+  if ! grep -Eq "${expected}" <<<"${out}"; then
+    echo "Trino assertion failed for ${name}" >&2
+    echo "Expected pattern: ${expected}" >&2
+    echo "Actual output:" >&2
+    echo "${out}" >&2
+    exit 1
+  fi
+}
+
+run_trino_restart_checks() {
+  local trino_schema="trino_fdb_${RUN_ID}"
+  local trino_table="orders"
+  local trino_view="orders_v"
+
+  echo "==> Trino bootstrap before restart"
+  run_trino_and_expect "Trino create schema" "CREATE SCHEMA IF NOT EXISTS iceberg.${trino_schema}" "^CREATE SCHEMA|already exists"
+  run_trino_and_expect "Trino create table" "CREATE TABLE iceberg.${trino_schema}.${trino_table} (order_id BIGINT, amount DOUBLE)" "^CREATE TABLE$"
+  run_trino_and_expect "Trino insert rows" "INSERT INTO iceberg.${trino_schema}.${trino_table} VALUES (1, 10.5), (2, 20.25)" "^INSERT: 2 rows$"
+  run_trino_and_expect "Trino create view" "CREATE VIEW iceberg.${trino_schema}.${trino_view} AS SELECT order_id, amount FROM iceberg.${trino_schema}.${trino_table}" "^CREATE VIEW$"
+  run_trino_and_expect "Trino pre-restart count" "SELECT count(*) AS c FROM iceberg.${trino_schema}.${trino_table}" "^[[:space:]]*2[[:space:]]*$"
+  run_trino_and_expect "Trino pre-restart view count" "SELECT count(*) AS c FROM iceberg.${trino_schema}.${trino_view}" "^[[:space:]]*2[[:space:]]*$"
+
+  echo "Stopping server for Trino restart checks..."
+  stop_server
+  require_port_free 8181 "Server"
+
+  echo "Restarting server for Trino reload checks..."
+  start_server
+  ensure_trino_running
+
+  echo "==> Trino reload after restart"
+  run_trino_and_expect "Trino post-restart table count" "SELECT count(*) AS c FROM iceberg.${trino_schema}.${trino_table}" "^[[:space:]]*2[[:space:]]*$"
+  run_trino_and_expect "Trino post-restart view count" "SELECT count(*) AS c FROM iceberg.${trino_schema}.${trino_view}" "^[[:space:]]*2[[:space:]]*$"
+  run_trino_and_expect "Trino post-restart snapshot count" "SELECT count(*) AS c FROM iceberg.${trino_schema}.\"${trino_table}\$snapshots\"" "^[[:space:]]*[1-9][0-9]*[[:space:]]*$"
+  run_trino_and_expect "Trino drop view" "DROP VIEW iceberg.${trino_schema}.${trino_view}" "^DROP VIEW$"
+  run_trino_and_expect "Trino drop table" "DROP TABLE iceberg.${trino_schema}.${trino_table}" "^DROP TABLE$"
+  run_trino_and_expect "Trino drop schema" "DROP SCHEMA iceberg.${trino_schema}" "^DROP SCHEMA$"
 }
 
 require_fdb_prereqs() {
@@ -347,18 +498,51 @@ stop_server() {
   kill_port_processes 8181
 }
 
+start_trino() {
+  kill_port_processes 8080
+  require_port_free 8080 "Trino"
+  prepare_trino_runtime_etc
+  nohup "${TRINO_LAUNCHER}" -etc-dir "${TRINO_RUNTIME_ETC}" run >"${TRINO_LOG}" 2>&1 &
+  TRINO_PID=$!
+  wait_for_trino
+}
+
+stop_trino() {
+  if [[ -n "${TRINO_PID}" ]]; then
+    kill "${TRINO_PID}" >/dev/null 2>&1 || true
+    wait "${TRINO_PID}" >/dev/null 2>&1 || true
+    TRINO_PID=""
+  fi
+  kill_port_processes 8080
+}
+
+ensure_trino_running() {
+  if run_trino_sql_raw "SELECT 1" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "Trino is not responding after server restart; starting a fresh Trino instance..."
+  start_trino
+}
+
 require_fdb_prereqs
+if [[ "${RUN_TRINO}" == "true" || "${RUN_SMOKE}" == "true" ]]; then
+  require_trino_prereqs
+fi
 if [[ "${RUN_SPARK}" == "true" ]]; then
   require_spark_prereqs
 fi
 
 if [[ "${RUN_SMOKE}" == "true" ]]; then
   echo "==> Running Trino smoke in FDB mode"
-  "${PROJECT_ROOT}/integration/trino_smoke.sh" --fdb
+  "${PROJECT_ROOT}/integration/trino_smoke.sh" --fdb --replace-server --replace-trino
 fi
 
 echo "==> Starting FDB-backed server for REST checks"
 start_server
+if [[ "${RUN_TRINO}" == "true" ]]; then
+  echo "==> Starting Trino for FDB-backed checks"
+  start_trino
+fi
 
 NS="fdb_it_${RUN_ID}"
 TABLE="orders_${RUN_ID}"
@@ -481,6 +665,9 @@ if [[ "${START_SERVER}" == "true" ]]; then
   if [[ "${RUN_SPARK}" == "true" ]]; then
     run_spark_restart_checks
   fi
+  if [[ "${RUN_TRINO}" == "true" ]]; then
+    run_trino_restart_checks
+  fi
 else
   echo "Skipping restart/reload checks because --no-start-server was set."
 fi
@@ -585,4 +772,7 @@ if [[ -n "${SERVER_LOG}" ]]; then
 fi
 if [[ "${RUN_SPARK}" == "true" ]]; then
   echo "Spark log: ${SPARK_LOG}"
+fi
+if [[ "${RUN_TRINO}" == "true" ]]; then
+  echo "Trino log: ${TRINO_LOG}"
 fi
