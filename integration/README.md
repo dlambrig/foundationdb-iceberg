@@ -33,6 +33,14 @@ cd /Users/dlambrig/apple/foundationdb-iceberg
 By default this starts both:
 - `IcebergRestServer` on `:8181`
 - Trino on `:8080` (unless already running)
+- a temporary copied Trino `etc/` with `local.location=/` so Trino can resolve absolute `file:///tmp/...` metadata paths correctly during metadata-table reads
+
+Current direct Trino smoke coverage includes:
+- schema/table lifecycle
+- inserts and reads
+- metadata tables (`$snapshots`, `$history`, `$files`, `$manifests`)
+- schema evolution (`ADD COLUMN` + post-read validation)
+- view lifecycle
 
 FDB-backed mode:
 
@@ -88,10 +96,22 @@ Use already-running server on `:8181`:
 ./integration/trino_smoke.sh --no-start-server
 ```
 
+Force a fresh local catalog restart on `:8181`:
+
+```bash
+./integration/trino_smoke.sh --replace-server
+```
+
 Use already-running Trino on `:8080`:
 
 ```bash
 ./integration/trino_smoke.sh --no-start-trino
+```
+
+Force a fresh local Trino restart on `:8080`:
+
+```bash
+./integration/trino_smoke.sh --replace-trino
 ```
 
 ## Run Trino Connector Subset
