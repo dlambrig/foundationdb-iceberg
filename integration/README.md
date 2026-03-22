@@ -53,6 +53,7 @@ This script:
 - starts `IcebergRestServer` in FDB mode
 - validates metrics endpoint behavior pre/post restart
 - validates restart/reload behavior for both table and view metadata pointers
+- runs a direct Spark write/restart/read cycle against the FDB-backed catalog (unless `--no-spark` is used)
 - validates namespace/table/view pagination behavior via REST APIs
 - validates longer repeated concurrent writer conflict behavior (one commit succeeds, one conflicts per iteration)
 - validates mixed update-action conflict behavior under concurrent commits
@@ -62,6 +63,7 @@ Options:
 
 ```bash
 ./integration/run_fdb_integration.sh --no-smoke
+./integration/run_fdb_integration.sh --no-spark
 ./integration/run_fdb_integration.sh --no-start-server
 ```
 
@@ -71,6 +73,13 @@ Stress knobs (optional env vars):
 CONCURRENT_ITERATIONS=20
 MIXED_CONFLICT_ITERATIONS=12
 WRITE_CYCLE_ITERATIONS=18
+```
+
+Spark-specific overrides:
+
+```bash
+SPARK_SQL_BIN=~/spark-3.5.5/bin/spark-sql
+ICEBERG_RUNTIME_JAR=/path/to/iceberg-spark-runtime-3.5_2.12-*.jar
 ```
 
 Use already-running server on `:8181`:
