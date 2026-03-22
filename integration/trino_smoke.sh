@@ -6,19 +6,24 @@ LOG_DIR="${PROJECT_ROOT}/integration/logs"
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
 SERVER_LOG="${LOG_DIR}/smoke_server_${RUN_ID}.log"
 TRINO_LOG="${LOG_DIR}/smoke_trino_${RUN_ID}.log"
+TRINO_RUNTIME_ETC=""
 SERVER_MODE="memory"
 SERVER_GRADLE_ARGS=()
 START_SERVER=true
 START_TRINO=true
+REPLACE_SERVER=false
+REPLACE_TRINO=false
 
 usage() {
   cat <<'EOF'
-Usage: ./integration/trino_smoke.sh [--fdb] [--no-start-server] [--no-start-trino]
+Usage: ./integration/trino_smoke.sh [--fdb] [--no-start-server] [--no-start-trino] [--replace-server] [--replace-trino]
 
 Options:
   --fdb              Run IcebergRestServer in FoundationDB mode (-Dfdb=true).
   --no-start-server  Use an already-running server on localhost:8181.
   --no-start-trino   Use an already-running Trino server on localhost:8080.
+  --replace-server   If a local server is already using port 8181, stop it and start a fresh one.
+  --replace-trino    If a local Trino is already using port 8080, stop it and start a fresh one.
   -h                 Show help.
 EOF
 }
@@ -36,6 +41,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-start-trino)
       START_TRINO=false
+      shift
+      ;;
+    --replace-server)
+      REPLACE_SERVER=true
+      shift
+      ;;
+    --replace-trino)
+      REPLACE_TRINO=true
       shift
       ;;
     -h|--help)
@@ -95,14 +108,42 @@ cleanup() {
     kill "${SERVER_PID}" >/dev/null 2>&1 || true
     wait "${SERVER_PID}" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${TRINO_RUNTIME_ETC}" ]]; then
+    rm -rf "${TRINO_RUNTIME_ETC}" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
+
+list_port_pids() {
+  local port="$1"
+  lsof -ti tcp:"${port}" 2>/dev/null || true
+}
+
+stop_port_pids() {
+  local port="$1"
+  local name="$2"
+  local pids
+  pids="$(list_port_pids "${port}")"
+  if [[ -z "${pids}" ]]; then
+    return 0
+  fi
+  echo "Replacing existing ${name} on port ${port}: ${pids}"
+  kill ${pids} >/dev/null 2>&1 || true
+  for _ in {1..20}; do
+    if [[ -z "$(list_port_pids "${port}")" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "ERROR: Timed out waiting for ${name} process(es) on port ${port} to stop: ${pids}" >&2
+  exit 1
+}
 
 require_port_free() {
   local port="$1"
   local name="$2"
   local pids
-  pids="$(lsof -ti tcp:"${port}" || true)"
+  pids="$(list_port_pids "${port}")"
   if [[ -n "${pids}" ]]; then
     echo "ERROR: ${name} port ${port} is already in use by PID(s): ${pids}" >&2
     echo "Stop existing process(es) first, or run: kill ${pids}" >&2
@@ -124,6 +165,10 @@ wait_for_http() {
   return 1
 }
 
+server_is_healthy() {
+  curl -sf "http://localhost:8181/v1/config" >/dev/null 2>&1
+}
+
 run_sql_raw() {
   local sql="$1"
   java -jar "${TRINO_CLI_JAR}" --server "${TRINO_SERVER_URL}" --output-format TSV_HEADER --execute "${sql}"
@@ -139,6 +184,25 @@ wait_for_trino() {
   done
   echo "ERROR: Timed out waiting for Trino" >&2
   return 1
+}
+
+prepare_trino_runtime_etc() {
+  TRINO_RUNTIME_ETC="${LOG_DIR}/trino_etc_${RUN_ID}"
+  rm -rf "${TRINO_RUNTIME_ETC}"
+  mkdir -p "${TRINO_RUNTIME_ETC}"
+  cp -R "${TRINO_ETC}/." "${TRINO_RUNTIME_ETC}/"
+
+  local iceberg_catalog="${TRINO_RUNTIME_ETC}/catalog/iceberg.properties"
+  if [[ ! -f "${iceberg_catalog}" ]]; then
+    echo "ERROR: Missing Iceberg catalog config: ${iceberg_catalog}" >&2
+    exit 1
+  fi
+
+  if rg -q '^local\.location=' "${iceberg_catalog}"; then
+    perl -0pi -e 's/^local\.location=.*/local.location=\//m' "${iceberg_catalog}"
+  else
+    printf '\nlocal.location=/\n' >> "${iceberg_catalog}"
+  fi
 }
 
 require_fdb_prereqs() {
@@ -194,13 +258,6 @@ run_and_expect() {
   fi
 }
 
-if [[ "${START_SERVER}" == "true" ]]; then
-  require_port_free 8181 "Server"
-fi
-if [[ "${START_TRINO}" == "true" ]] && ! lsof -ti tcp:8080 >/dev/null 2>&1; then
-  require_port_free 8080 "Trino"
-fi
-
 if [[ "${SERVER_MODE}" == "fdb" ]]; then
   require_fdb_prereqs
 fi
@@ -211,9 +268,37 @@ echo "Trino URL: ${TRINO_SERVER_URL}"
 echo "CLI jar: ${TRINO_CLI_JAR}"
 
 if [[ "${START_TRINO}" == "true" ]]; then
-  if lsof -ti tcp:8080 >/dev/null 2>&1; then
-    echo "Trino already running on :8080, using existing process"
-  else
+  if [[ -n "$(list_port_pids 8080)" ]]; then
+    if [[ "${REPLACE_TRINO}" == "true" ]]; then
+      stop_port_pids 8080 "Trino"
+    elif wait_for_trino >/dev/null 2>&1; then
+      echo "Trino already running on :8080, using existing process"
+      START_TRINO=false
+    else
+      echo "ERROR: Trino port 8080 is already in use, but the existing listener is not responding to queries." >&2
+      echo "Use --replace-trino to restart it, or stop it manually." >&2
+      exit 1
+    fi
+  fi
+fi
+
+if [[ "${START_SERVER}" == "true" ]]; then
+  if [[ -n "$(list_port_pids 8181)" ]]; then
+    if [[ "${REPLACE_SERVER}" == "true" ]]; then
+      stop_port_pids 8181 "Server"
+    elif server_is_healthy; then
+      echo "Reusing existing server on :8181"
+      START_SERVER=false
+    else
+      echo "ERROR: Server port 8181 is already in use, but the existing listener is not a healthy Iceberg REST server." >&2
+      echo "Use --replace-server to restart it, or stop it manually." >&2
+      exit 1
+    fi
+  fi
+fi
+
+if [[ "${START_TRINO}" == "true" ]]; then
+  if [[ -z "$(list_port_pids 8080)" ]]; then
     if [[ -z "${TRINO_SERVER_DIR}" || ! -d "${TRINO_SERVER_DIR}" ]]; then
       echo "ERROR: Unable to find Trino server directory. Set TRINO_SERVER_DIR or use --no-start-trino." >&2
       exit 1
@@ -226,9 +311,15 @@ if [[ "${START_TRINO}" == "true" ]]; then
       echo "ERROR: TRINO_ETC does not exist: ${TRINO_ETC}" >&2
       exit 1
     fi
+    prepare_trino_runtime_etc
     echo "Starting Trino via ${TRINO_LAUNCHER}"
-    nohup "${TRINO_LAUNCHER}" -etc-dir "${TRINO_ETC}" run >"${TRINO_LOG}" 2>&1 &
+    nohup "${TRINO_LAUNCHER}" -etc-dir "${TRINO_RUNTIME_ETC}" run >"${TRINO_LOG}" 2>&1 &
     TRINO_PID=$!
+  fi
+else
+  if ! wait_for_trino >/dev/null 2>&1; then
+    echo "ERROR: --no-start-trino was set, but Trino is not reachable at ${TRINO_SERVER_URL}" >&2
+    exit 1
   fi
 fi
 
@@ -242,6 +333,11 @@ if [[ "${START_SERVER}" == "true" ]]; then
     fi
   ) >"${SERVER_LOG}" 2>&1 &
   SERVER_PID=$!
+else
+  if ! server_is_healthy; then
+    echo "ERROR: --no-start-server or reuse path selected, but server is not healthy on http://localhost:8181" >&2
+    exit 1
+  fi
 fi
 
 wait_for_http "http://localhost:8181/v1/config" "Server"
@@ -257,8 +353,16 @@ run_and_expect "Create table" "CREATE TABLE iceberg.${SCHEMA}.${TABLE} (order_id
 run_and_expect "Insert rows" "INSERT INTO iceberg.${SCHEMA}.${TABLE} VALUES (1, 10.5), (2, 20.25)" "^INSERT: 2 rows$"
 run_and_expect "Row count" "SELECT count(*) AS c FROM iceberg.${SCHEMA}.${TABLE}" "^[[:space:]]*2[[:space:]]*$"
 run_and_expect "Describe table" "DESCRIBE iceberg.${SCHEMA}.${TABLE}" "order_id|amount"
+run_and_expect "Snapshots metadata table" "SELECT count(*) AS c FROM iceberg.${SCHEMA}.\"${TABLE}\$snapshots\"" "^[[:space:]]*[1-9][0-9]*[[:space:]]*$"
+run_and_expect "History metadata table" "SELECT count(*) AS c FROM iceberg.${SCHEMA}.\"${TABLE}\$history\"" "^[[:space:]]*[1-9][0-9]*[[:space:]]*$"
+run_and_expect "Files metadata table" "SELECT count(*) AS c FROM iceberg.${SCHEMA}.\"${TABLE}\$files\"" "^[[:space:]]*[1-9][0-9]*[[:space:]]*$"
+run_and_expect "Manifests metadata table" "SELECT count(*) AS c FROM iceberg.${SCHEMA}.\"${TABLE}\$manifests\"" "^[[:space:]]*[1-9][0-9]*[[:space:]]*$"
+run_and_expect "Schema evolution add column" "ALTER TABLE iceberg.${SCHEMA}.${TABLE} ADD COLUMN note VARCHAR" "^ADD COLUMN$"
+run_and_expect "Insert rows with evolved schema" "INSERT INTO iceberg.${SCHEMA}.${TABLE} (order_id, amount, note) VALUES (3, 30.0, 'after alter')" "^INSERT: 1 row|^INSERT: 1 rows$"
+run_and_expect "Read evolved schema values" "SELECT order_id, note FROM iceberg.${SCHEMA}.${TABLE} ORDER BY order_id" "after alter"
+run_and_expect "Show create table" "SHOW CREATE TABLE iceberg.${SCHEMA}.${TABLE}" "note varchar"
 run_and_expect "Create view" "CREATE VIEW iceberg.${SCHEMA}.${VIEW} AS SELECT order_id, amount FROM iceberg.${SCHEMA}.${TABLE}" "^CREATE VIEW$"
-run_and_expect "View row count" "SELECT count(*) AS c FROM iceberg.${SCHEMA}.${VIEW}" "^[[:space:]]*2[[:space:]]*$"
+run_and_expect "View row count" "SELECT count(*) AS c FROM iceberg.${SCHEMA}.${VIEW}" "^[[:space:]]*3[[:space:]]*$"
 run_and_expect "Show create view" "SHOW CREATE VIEW iceberg.${SCHEMA}.${VIEW}" "CREATE VIEW iceberg\\.${SCHEMA}\\.${VIEW}"
 run_and_expect "Drop view" "DROP VIEW iceberg.${SCHEMA}.${VIEW}" "^DROP VIEW$"
 run_and_expect "Show tables" "SHOW TABLES FROM iceberg.${SCHEMA}" "${TABLE}"
