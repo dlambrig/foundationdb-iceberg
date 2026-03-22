@@ -241,11 +241,11 @@ echo "Scenarios: ${SCENARIOS}"
 if [[ "${START_SERVER}" == "true" ]]; then
   EXISTING_PIDS="$(list_port_pids "${REST_PORT}")"
   if [[ -n "${EXISTING_PIDS}" ]]; then
-    if server_is_healthy; then
+    if [[ "${REPLACE_SERVER}" == "true" ]]; then
+      stop_port_pids "${REST_PORT}"
+    elif server_is_healthy; then
       echo "Reusing existing server at ${REST_URI} (PID(s): ${EXISTING_PIDS})"
       START_SERVER=false
-    elif [[ "${REPLACE_SERVER}" == "true" ]]; then
-      stop_port_pids "${REST_PORT}"
     else
       echo "ERROR: Server port ${REST_PORT} is already in use by PID(s): ${EXISTING_PIDS}" >&2
       echo "The existing listener is not responding as a healthy Iceberg REST server at ${REST_URI}." >&2

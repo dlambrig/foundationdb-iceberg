@@ -68,6 +68,19 @@ tasks.register('runIcebergRestServer', JavaExec) {
     }
 }
 
+jar {
+    manifest {
+        attributes(
+            'Main-Class': 'com.yourpackage.IcebergCatalogApplication' 
+        )
+    }
+    // This ensures all dependencies are included in a "fat" JAR if needed
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
 tasks.named('test') {
     useJUnitPlatform()
 }

@@ -6,10 +6,14 @@
 An implementation of the **Apache Iceberg REST Catalog** specification backed by **FoundationDB**.
 
 ## 🚀 The Vision
-Traditional Iceberg catalogs (JDBC/Hive) can become a bottleneck in high-concurrency environments. This project leverages FoundationDB’s **strictly serializable transactions** and **optimistic concurrency control** to provide a horizontally scalable, lock-free metadata control plane for modern data lakes.
+
+Traditional metastore-based catalog deployments can become a central bottleneck in high-concurrency or large-scale environments. This project uses
+FoundationDB’s strictly serializable transactions and optimistic concurrency control to provide a transactional metadata service for Iceberg REST catalog
+operations.
 
 ## 🏗️ Architecture
-By unbundling the catalog from the storage layer, we achieve high-throughput metadata operations while maintaining the ACID guarantees required for atomic Iceberg table commits.
+This project implements the Iceberg REST catalog layer on top of FoundationDB, using FoundationDB transactions for catalog metadata operations while
+leaving table data and metadata files in external storage.
 
 ```mermaid
 sequenceDiagram
@@ -30,35 +34,95 @@ sequenceDiagram
 * **ACID Foundations:** Uses FDB transactions to ensure table versions are never corrupted, even under heavy parallel write pressure.
 * **Stateless Scaling:** The REST tier is entirely stateless; scale your API nodes to match your query volume.
 
-## 🛠️ Getting Started (Quickstart)
+## 🛠️ Getting Started
 
 ### Prerequisites
-* Java 17+
-* A running FoundationDB cluster (or local `fdbmonitor`)
+* Java 17+ for local Gradle-based runs
+* Docker Desktop (or another Docker engine) for the containerized workflow
 
-### Running with Docker (Coming Soon)
+### Run with Docker Compose
+
+The checked-in `docker-compose.yaml` starts three containers:
+* `fdb`: FoundationDB
+* `iceberg-catalog`: this catalog server on port `8181`
+* `spark-iceberg`: a Spark client container preconfigured to talk to the catalog over the Docker network
+
+Start the stack from repo root:
+
 ```bash
-# Clone the repo
-git clone [https://github.com/dlambrig/foundationdb-iceberg.git](https://github.com/dlambrig/foundationdb-iceberg.git)
+git clone https://github.com/dlambrig/foundationdb-iceberg.git
 cd foundationdb-iceberg
-
-# Build and Run
-./gradlew bootRun
+docker compose up --build -d
 ```
 
-## 🗺️ Roadmap & Maturity
-This project is currently a **Technical Preview**. 
+Note: on modern Docker installs the command is `docker compose` (with a space), not `docker-compose`.
 
-- [x] Namespace Management (Create/Drop/List)
-- [x] Basic Table CRUD
-- [ ] **Next Up:** Full Snapshot management logic
-- [ ] **Next Up:** Integration testing with `Testcontainers` and `fdb-java`
-- [ ] Multi-region metadata replication strategy
+Check that the services are up:
 
-## 🤝 Contributing
-This is an open-source exploration of high-performance metadata. If you've hit "Metastore scaling walls" before, I'd love your input on our FDB key-mapping strategy.
+```bash
+docker compose ps
+docker compose logs -f iceberg-catalog
+```
+
+Verify the REST catalog is responding:
+
+```bash
+curl http://localhost:8181/v1/config
+```
+
+Open a shell in the Spark container:
+
+```bash
+docker compose exec spark-iceberg bash
+```
+
+From inside that container, start Spark SQL:
+
+```bash
+spark-sql
+```
+
+The Spark container is configured with an Iceberg REST catalog named `fdb`. Example SQL:
+
+```sql
+CREATE NAMESPACE IF NOT EXISTS fdb.demo;
+
+CREATE TABLE fdb.demo.orders (
+  order_id BIGINT,
+  amount DOUBLE
+) USING iceberg;
+
+INSERT INTO fdb.demo.orders VALUES (1, 10.5), (2, 20.25);
+
+SELECT * FROM fdb.demo.orders ORDER BY order_id;
+```
+
+Stop the stack:
+
+```bash
+docker compose down
+```
+
+If you want to remove persisted Docker volumes as well:
+
+```bash
+docker compose down -v
+```
+
+### Run Locally
+
+Start the catalog server locally:
+
+```bash
+./gradlew runIcebergRestServer -Dfdb=true
+```
+
+Then run the direct Spark smoke suite against it:
+
+```bash
+SPARK_SQL_BIN=~/spark-3.5.5/bin/spark-sql ./integration/spark_smoke.sh --fdb
+```
 
 ---
 Created by [Dan Lambright](https://github.com/dlambrig)
 ```
-
