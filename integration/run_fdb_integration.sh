@@ -12,13 +12,27 @@ WRITE_CYCLE_ITERATIONS="${WRITE_CYCLE_ITERATIONS:-18}"
 
 START_SERVER=true
 RUN_SMOKE=true
+RUN_SPARK=true
+
+SPARK_SQL_BIN="${SPARK_SQL_BIN:-spark-sql}"
+SPARK_MASTER="${SPARK_MASTER:-local[2]}"
+ICEBERG_HOME="${ICEBERG_HOME:-/Users/dlambrig/iceberg}"
+SPARK_VERSION="${SPARK_VERSION:-3.5}"
+SCALA_VERSION="${SCALA_VERSION:-2.12}"
+CATALOG_NAME="${CATALOG_NAME:-rest}"
+WAREHOUSE_URI="${WAREHOUSE_URI:-file:///tmp/fdb_iceberg_spark_warehouse}"
+REST_URI="${REST_URI:-http://localhost:8181}"
+SPARK_LOG="${LOG_DIR}/fdb_spark_${RUN_ID}.log"
+SPARK_STATE_DIR="${LOG_DIR}/fdb_spark_state_${RUN_ID}"
+ICEBERG_RUNTIME_JAR="${ICEBERG_RUNTIME_JAR:-}"
 
 usage() {
   cat <<'EOF'
-Usage: ./integration/run_fdb_integration.sh [--no-smoke] [--no-start-server]
+Usage: ./integration/run_fdb_integration.sh [--no-smoke] [--no-spark] [--no-start-server]
 
 Options:
   --no-smoke         Skip ./integration/trino_smoke.sh --fdb pre-check.
+  --no-spark         Skip direct Spark write/restart/read checks.
   --no-start-server  Use an already-running server on localhost:8181 for REST checks.
   -h                 Show help.
 EOF
@@ -28,6 +42,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-smoke)
       RUN_SMOKE=false
+      shift
+      ;;
+    --no-spark)
+      RUN_SPARK=false
       shift
       ;;
     --no-start-server)
@@ -47,6 +65,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 mkdir -p "${LOG_DIR}"
+mkdir -p "${SPARK_STATE_DIR}"
 
 SERVER_PID=""
 
@@ -97,6 +116,116 @@ wait_for_http() {
   done
   echo "ERROR: Timed out waiting for ${name}" >&2
   return 1
+}
+
+spark_version_output() {
+  "${SPARK_SQL_BIN}" --version 2>&1
+}
+
+validate_spark_binary() {
+  local version_output spark_version_line scala_version_line
+  version_output="$(spark_version_output)"
+  spark_version_line="$(printf '%s\n' "${version_output}" | rg -m1 'version [0-9]+\.[0-9]+\.[0-9]+' || true)"
+  scala_version_line="$(printf '%s\n' "${version_output}" | rg -m1 'Scala version [0-9]+\.[0-9]+' || true)"
+
+  if [[ "${spark_version_line}" != *"version ${SPARK_VERSION}."* ]]; then
+    echo "ERROR: spark-sql version does not match SPARK_VERSION=${SPARK_VERSION}" >&2
+    echo "Detected: ${spark_version_line:-unknown}" >&2
+    echo "Set SPARK_SQL_BIN to a Spark ${SPARK_VERSION}.x binary." >&2
+    exit 1
+  fi
+
+  if [[ "${scala_version_line}" != *"Scala version ${SCALA_VERSION}."* ]]; then
+    echo "ERROR: spark-sql Scala version does not match SCALA_VERSION=${SCALA_VERSION}" >&2
+    echo "Detected: ${scala_version_line:-unknown}" >&2
+    echo "Set SPARK_SQL_BIN to a Spark build using Scala ${SCALA_VERSION}.x." >&2
+    exit 1
+  fi
+}
+
+require_spark_prereqs() {
+  if ! command -v "${SPARK_SQL_BIN}" >/dev/null 2>&1; then
+    echo "ERROR: Spark checks require spark-sql (${SPARK_SQL_BIN})" >&2
+    exit 1
+  fi
+
+  validate_spark_binary
+
+  if [[ -z "${ICEBERG_RUNTIME_JAR}" ]]; then
+    ICEBERG_RUNTIME_JAR="$(ls "${ICEBERG_HOME}/spark/v${SPARK_VERSION}/spark-runtime/build/libs"/iceberg-spark-runtime-${SPARK_VERSION}_${SCALA_VERSION}-*.jar 2>/dev/null | head -n1 || true)"
+  fi
+  if [[ -z "${ICEBERG_RUNTIME_JAR}" || ! -f "${ICEBERG_RUNTIME_JAR}" ]]; then
+    echo "ERROR: Spark checks require Iceberg Spark runtime jar under ${ICEBERG_HOME}/spark/v${SPARK_VERSION}/spark-runtime/build/libs/" >&2
+    echo "Set ICEBERG_RUNTIME_JAR explicitly or build the runtime jar first." >&2
+    exit 1
+  fi
+}
+
+run_spark_sql_file() {
+  local sql_file="$1"
+  "${SPARK_SQL_BIN}" \
+    --master "${SPARK_MASTER}" \
+    --jars "${ICEBERG_RUNTIME_JAR}" \
+    --driver-java-options "-Dderby.system.home=${SPARK_STATE_DIR}" \
+    --conf "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions" \
+    --conf "spark.sql.catalog.${CATALOG_NAME}=org.apache.iceberg.spark.SparkCatalog" \
+    --conf "spark.sql.catalog.${CATALOG_NAME}.type=rest" \
+    --conf "spark.sql.catalog.${CATALOG_NAME}.uri=${REST_URI}" \
+    --conf "spark.sql.catalog.${CATALOG_NAME}.warehouse=${WAREHOUSE_URI}" \
+    --conf "spark.sql.warehouse.dir=${SPARK_STATE_DIR}/spark-warehouse" \
+    --conf "spark.sql.catalog.${CATALOG_NAME}.io-impl=org.apache.iceberg.hadoop.HadoopFileIO" \
+    -f "${sql_file}" >> "${SPARK_LOG}" 2>&1
+}
+
+assert_spark_log_contains() {
+  local pattern="$1"
+  local message="$2"
+  if ! grep -Eq "${pattern}" "${SPARK_LOG}"; then
+    echo "ERROR: ${message}" >&2
+    echo "See Spark log: ${SPARK_LOG}" >&2
+    exit 1
+  fi
+}
+
+run_spark_restart_checks() {
+  local spark_ns="spark_fdb_${RUN_ID}"
+  local spark_table="orders"
+  local spark_view="orders_v"
+  local bootstrap_sql="${LOG_DIR}/fdb_spark_bootstrap_${RUN_ID}.sql"
+  local reload_sql="${LOG_DIR}/fdb_spark_reload_${RUN_ID}.sql"
+
+  echo "==> Spark bootstrap before restart"
+  cat > "${bootstrap_sql}" <<EOF
+CREATE NAMESPACE IF NOT EXISTS ${CATALOG_NAME}.${spark_ns};
+CREATE TABLE ${CATALOG_NAME}.${spark_ns}.${spark_table} (order_id BIGINT, amount DOUBLE) USING iceberg;
+INSERT INTO ${CATALOG_NAME}.${spark_ns}.${spark_table} VALUES (1, 10.5), (2, 20.25);
+CREATE VIEW ${CATALOG_NAME}.${spark_ns}.${spark_view} AS SELECT order_id, amount FROM ${CATALOG_NAME}.${spark_ns}.${spark_table};
+SELECT COUNT(*) AS spark_pre_restart_count FROM ${CATALOG_NAME}.${spark_ns}.${spark_table};
+SELECT COUNT(*) AS spark_pre_restart_view_count FROM ${CATALOG_NAME}.${spark_ns}.${spark_view};
+EOF
+  : > "${SPARK_LOG}"
+  run_spark_sql_file "${bootstrap_sql}"
+  assert_spark_log_contains '(^|[[:space:]])2($|[[:space:]])' "Spark bootstrap did not produce expected row counts before restart."
+
+  echo "Stopping server for Spark restart checks..."
+  stop_server
+  require_port_free 8181 "Server"
+
+  echo "Restarting server for Spark reload checks..."
+  start_server
+
+  echo "==> Spark reload after restart"
+  cat > "${reload_sql}" <<EOF
+SELECT COUNT(*) AS spark_post_restart_count FROM ${CATALOG_NAME}.${spark_ns}.${spark_table};
+SELECT COUNT(*) AS spark_post_restart_view_count FROM ${CATALOG_NAME}.${spark_ns}.${spark_view};
+SELECT COUNT(*) AS spark_post_restart_snapshot_count FROM ${CATALOG_NAME}.${spark_ns}.${spark_table}.snapshots;
+DROP VIEW ${CATALOG_NAME}.${spark_ns}.${spark_view};
+DROP TABLE ${CATALOG_NAME}.${spark_ns}.${spark_table};
+DROP NAMESPACE ${CATALOG_NAME}.${spark_ns};
+EOF
+  run_spark_sql_file "${reload_sql}"
+  assert_spark_log_contains '(^|[[:space:]])2($|[[:space:]])' "Spark reload did not preserve expected table/view row counts after restart."
+  assert_spark_log_contains '(^|[[:space:]])1($|[[:space:]])' "Spark reload did not show a snapshot count after restart."
 }
 
 require_fdb_prereqs() {
@@ -219,6 +348,9 @@ stop_server() {
 }
 
 require_fdb_prereqs
+if [[ "${RUN_SPARK}" == "true" ]]; then
+  require_spark_prereqs
+fi
 
 if [[ "${RUN_SMOKE}" == "true" ]]; then
   echo "==> Running Trino smoke in FDB mode"
@@ -345,6 +477,10 @@ if [[ "${START_SERVER}" == "true" ]]; then
 
   METRICS_RESP_AFTER="$(run_http_request "POST" "http://localhost:8181/v1/namespaces/${NS}/tables/${TABLE}/metrics" "${METRICS_PAYLOAD}")"
   assert_http_status "report metrics post-restart" "${METRICS_RESP_AFTER}" "204"
+
+  if [[ "${RUN_SPARK}" == "true" ]]; then
+    run_spark_restart_checks
+  fi
 else
   echo "Skipping restart/reload checks because --no-start-server was set."
 fi
@@ -446,4 +582,7 @@ echo
 echo "FDB integration checks passed."
 if [[ -n "${SERVER_LOG}" ]]; then
   echo "Server log: ${SERVER_LOG}"
+fi
+if [[ "${RUN_SPARK}" == "true" ]]; then
+  echo "Spark log: ${SPARK_LOG}"
 fi
