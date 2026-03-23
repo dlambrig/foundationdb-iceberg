@@ -1463,7 +1463,7 @@ class IcebergRestServerLogicTest {
                 {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
                 """;
         String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
-        IcebergRestServer.persistMetadataFile(base);
+        MetadataFileSupport.persistMetadataFile(base);
         store.putTableResponse("sales", "orders", base);
 
         String commit = """
@@ -1624,7 +1624,7 @@ class IcebergRestServerLogicTest {
                 {"name":"orders","schema":{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"order_id","required":false,"type":"long"}]}}
                 """;
         String base = IcebergRestServer.buildLoadTableResponseJson("sales", createRequest);
-        IcebergRestServer.persistMetadataFile(base);
+        MetadataFileSupport.persistMetadataFile(base);
         store.putTableResponse("sales", "orders", base);
 
         String commit1 = """
@@ -1633,7 +1633,7 @@ class IcebergRestServerLogicTest {
         String after1 = store.commitTable("sales", "orders", commit1);
         JsonNode after1Root = MAPPER.readTree(after1);
         String metadataFile00000 = after1Root.path("metadata").path("metadata-log").get(0).path("metadata-file").asText();
-        Path metadataPath00000 = IcebergRestServer.resolveWritablePath(metadataFile00000);
+        Path metadataPath00000 = MetadataFileSupport.resolveWritablePath(metadataFile00000);
         assertTrue(Files.exists(metadataPath00000));
 
         String commit2 = """
@@ -1692,11 +1692,11 @@ class IcebergRestServerLogicTest {
 
     @Test
     void resolveWritablePathHandlesLocalAndFileSchemes() {
-        Path localPath = IcebergRestServer.resolveWritablePath("local:///iceberg_warehouse/a/b/c.metadata.json");
+        Path localPath = MetadataFileSupport.resolveWritablePath("local:///iceberg_warehouse/a/b/c.metadata.json");
         assertTrue(localPath.toString().contains("iceberg_warehouse"));
 
         Path expectedFilePath = Paths.get("/tmp/x.metadata.json");
-        Path actualFilePath = IcebergRestServer.resolveWritablePath("file:///tmp/x.metadata.json");
+        Path actualFilePath = MetadataFileSupport.resolveWritablePath("file:///tmp/x.metadata.json");
         assertEquals(expectedFilePath, actualFilePath);
     }
 }

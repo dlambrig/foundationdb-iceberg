@@ -13,12 +13,12 @@ class InMemoryViewStore implements ViewStore {
         if (metadataLocation == null) {
             return null;
         }
-        return IcebergRestServer.loadTableResponseFromMetadataLocation(metadataLocation);
+        return MetadataFileSupport.loadResponseFromMetadataLocation(metadataLocation);
     }
 
     @Override
     public synchronized void putViewResponse(String namespace, String view, String responseJson) {
-        String metadataLocation = IcebergRestServer.extractMetadataLocation(responseJson);
+        String metadataLocation = MetadataFileSupport.extractMetadataLocation(responseJson);
         viewMetadataLocations.put(key(namespace, view), metadataLocation);
     }
 
@@ -28,10 +28,10 @@ class InMemoryViewStore implements ViewStore {
         if (currentMetadataLocation == null) {
             throw new ViewNotFoundException("View not found: " + namespace + "." + view);
         }
-        String existingResponseJson = IcebergRestServer.loadTableResponseFromMetadataLocation(currentMetadataLocation);
+        String existingResponseJson = MetadataFileSupport.loadResponseFromMetadataLocation(currentMetadataLocation);
         String updatedResponseJson = IcebergRestServer.applyCommitToViewResponseJson(existingResponseJson, commitRequestBody);
-        String updatedMetadataLocation = IcebergRestServer.extractMetadataLocation(updatedResponseJson);
-        IcebergRestServer.persistMetadataFile(updatedResponseJson);
+        String updatedMetadataLocation = MetadataFileSupport.extractMetadataLocation(updatedResponseJson);
+        MetadataFileSupport.persistMetadataFile(updatedResponseJson);
         viewMetadataLocations.put(key(namespace, view), updatedMetadataLocation);
         return updatedResponseJson;
     }
