@@ -11,6 +11,7 @@ START_SERVER=true
 REPLACE_SERVER=false
 SERVER_MODE="memory"
 SERVER_GRADLE_ARGS=()
+SCENARIOS="basic,schema_evolution"
 
 REST_URI="${REST_URI:-http://localhost:8181}"
 WAREHOUSE_URI="${WAREHOUSE_URI:-file:///tmp/iceberg_warehouse}"
@@ -23,7 +24,7 @@ COMMONS_LOGGING_JAR="${COMMONS_LOGGING_JAR:-/Users/dlambrig/spark-3.5.5/jars/com
 
 usage() {
   cat <<'EOF'
-Usage: ./integration/flink_smoke.sh [--fdb] [--no-start-server] [--replace-server]
+Usage: ./integration/flink_smoke.sh [--fdb] [--no-start-server] [--replace-server] [--scenario basic,schema_evolution]
 
 Runs a direct Flink SQL smoke flow against foundationdb-iceberg using a Dockerized
 Flink SQL client plus a local Flink mini cluster inside the container.
@@ -32,6 +33,7 @@ Options:
   --fdb              Start foundationdb-iceberg in FDB mode (-Dfdb=true).
   --no-start-server  Reuse an existing server at REST_URI.
   --replace-server   Stop a conflicting local server on REST_URI's port and start a fresh one.
+  --scenario         Comma-separated scenarios to run (default: basic,schema_evolution).
   -h, --help         Show help.
 
 Environment overrides:
@@ -60,6 +62,14 @@ while [[ $# -gt 0 ]]; do
     --replace-server)
       REPLACE_SERVER=true
       shift
+      ;;
+    --scenario)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --scenario requires a value" >&2
+        exit 1
+      fi
+      SCENARIOS="$2"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -206,6 +216,20 @@ assert_log_contains() {
   fi
 }
 
+run_flink_sql_file() {
+  local sql_file="$1"
+  docker run --rm \
+    --add-host host.docker.internal:host-gateway \
+    -v "${sql_file}":/work/flink_rest_smoke.sql:ro \
+    -v "${FLINK_ICEBERG_RUNTIME_JAR}":/opt/flink/lib/iceberg-flink-runtime.jar:ro \
+    -v "${HADOOP_CLIENT_API_JAR}":/opt/flink/lib/hadoop-client-api.jar:ro \
+    -v "${HADOOP_CLIENT_RUNTIME_JAR}":/opt/flink/lib/hadoop-client-runtime.jar:ro \
+    -v "${COMMONS_LOGGING_JAR}":/opt/flink/lib/commons-logging.jar:ro \
+    -v /tmp/iceberg_warehouse:/tmp/iceberg_warehouse \
+    "${FLINK_IMAGE}" \
+    sh -lc '/opt/flink/bin/start-cluster.sh && /opt/flink/bin/sql-client.sh embedded -f /work/flink_rest_smoke.sql'
+}
+
 REST_PORT="$(rest_port)"
 if [[ "${SERVER_MODE}" == "fdb" ]]; then
   require_fdb_prereqs
@@ -250,8 +274,10 @@ if [[ "${START_SERVER}" == "true" ]]; then
 fi
 
 NAMESPACE="flink_smoke_${RUN_ID}"
-SQL_FILE="${LOG_DIR}/flink_smoke_${RUN_ID}.sql"
-cat > "${SQL_FILE}" <<'SQL'
+
+run_basic_scenario() {
+  SQL_FILE="${LOG_DIR}/flink_smoke_${RUN_ID}_basic.sql"
+  cat > "${SQL_FILE}" <<'SQL'
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.dml-sync' = 'true';
 SET 'sql-client.execution.result-mode' = 'TABLEAU';
@@ -268,26 +294,66 @@ CREATE TABLE orders (id BIGINT, amount DOUBLE);
 INSERT INTO orders VALUES (1, 10.5), (2, 20.25);
 SELECT COUNT(*) AS c FROM orders;
 DROP TABLE orders;
-USE default_database;
-DROP DATABASE __NAMESPACE__;
+USE CATALOG default_catalog;
+DROP DATABASE rest.__NAMESPACE__;
 SQL
-perl -0pi -e "s/__NAMESPACE__/${NAMESPACE}/g" "${SQL_FILE}"
+  perl -0pi -e "s/__NAMESPACE__/${NAMESPACE}/g" "${SQL_FILE}"
 
-echo "==> Running Flink smoke flow"
-docker run --rm \
-  --add-host host.docker.internal:host-gateway \
-  -v "${SQL_FILE}":/work/flink_rest_smoke.sql:ro \
-  -v "${FLINK_ICEBERG_RUNTIME_JAR}":/opt/flink/lib/iceberg-flink-runtime.jar:ro \
-  -v "${HADOOP_CLIENT_API_JAR}":/opt/flink/lib/hadoop-client-api.jar:ro \
-  -v "${HADOOP_CLIENT_RUNTIME_JAR}":/opt/flink/lib/hadoop-client-runtime.jar:ro \
-  -v "${COMMONS_LOGGING_JAR}":/opt/flink/lib/commons-logging.jar:ro \
-  -v /tmp/iceberg_warehouse:/tmp/iceberg_warehouse \
-  "${FLINK_IMAGE}" \
-  sh -lc '/opt/flink/bin/start-cluster.sh && /opt/flink/bin/sql-client.sh embedded -f /work/flink_rest_smoke.sql' \
-  > "${FLINK_LOG}" 2>&1
+  echo "==> Running Flink basic scenario"
+  run_flink_sql_file "${SQL_FILE}" >> "${FLINK_LOG}" 2>&1
+  assert_log_contains 'Complete execution of the SQL update statement' "Flink basic INSERT did not complete successfully"
+  assert_log_contains '[|][[:space:]]*2[[:space:]]*[|]' "Flink basic query result did not show the expected row count"
+}
 
-assert_log_contains 'Complete execution of the SQL update statement' "Flink INSERT did not complete successfully"
-assert_log_contains '\| 2 \|' "Flink query result did not show the expected row count"
+run_schema_evolution_scenario() {
+  SQL_FILE="${LOG_DIR}/flink_smoke_${RUN_ID}_schema_evolution.sql"
+  cat > "${SQL_FILE}" <<'SQL'
+SET 'execution.runtime-mode' = 'batch';
+SET 'table.dml-sync' = 'true';
+SET 'sql-client.execution.result-mode' = 'TABLEAU';
+CREATE CATALOG rest WITH (
+  'type' = 'iceberg',
+  'catalog-type' = 'rest',
+  'uri' = 'http://host.docker.internal:8181',
+  'warehouse' = 'file:///tmp/iceberg_warehouse'
+);
+USE CATALOG rest;
+CREATE DATABASE IF NOT EXISTS __NAMESPACE__;
+USE __NAMESPACE__;
+CREATE TABLE orders_evolved (id BIGINT, amount DOUBLE);
+INSERT INTO orders_evolved VALUES (1, 10.5), (2, 20.25);
+ALTER TABLE orders_evolved ADD note STRING;
+INSERT INTO orders_evolved VALUES (3, 30.75, 'evolved');
+SELECT COUNT(*) AS c FROM orders_evolved;
+SELECT COUNT(note) AS noted FROM orders_evolved;
+DROP TABLE orders_evolved;
+USE CATALOG default_catalog;
+DROP DATABASE rest.__NAMESPACE__;
+SQL
+  perl -0pi -e "s/__NAMESPACE__/${NAMESPACE}/g" "${SQL_FILE}"
+
+  echo "==> Running Flink schema_evolution scenario"
+  run_flink_sql_file "${SQL_FILE}" >> "${FLINK_LOG}" 2>&1
+  assert_log_contains '[|][[:space:]]*3[[:space:]]*[|]' "Flink schema_evolution did not show the expected total row count"
+  assert_log_contains '[|][[:space:]]*1[[:space:]]*[|]' "Flink schema_evolution did not show the expected evolved-column row count"
+}
+
+echo "==> Running Flink scenarios: ${SCENARIOS}"
+IFS=',' read -r -a SCENARIO_LIST <<< "${SCENARIOS}"
+for scenario in "${SCENARIO_LIST[@]}"; do
+  case "${scenario}" in
+    basic)
+      run_basic_scenario
+      ;;
+    schema_evolution)
+      run_schema_evolution_scenario
+      ;;
+    *)
+      echo "ERROR: Unknown Flink scenario: ${scenario}" >&2
+      exit 1
+      ;;
+  esac
+done
 
 echo
 echo "Flink smoke passed."

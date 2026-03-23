@@ -37,6 +37,11 @@ TRINO_SERVER_DIR="${TRINO_SERVER_DIR:-}"
 TRINO_LAUNCHER="${TRINO_LAUNCHER:-}"
 TRINO_RUNTIME_ETC=""
 FLINK_LOG=""
+FLINK_IMAGE="${FLINK_IMAGE:-flink:2.1.0-scala_2.12-java17}"
+FLINK_ICEBERG_RUNTIME_JAR="${FLINK_ICEBERG_RUNTIME_JAR:-}"
+HADOOP_CLIENT_API_JAR="${HADOOP_CLIENT_API_JAR:-/Users/dlambrig/spark-3.5.5/jars/hadoop-client-api-3.3.4.jar}"
+HADOOP_CLIENT_RUNTIME_JAR="${HADOOP_CLIENT_RUNTIME_JAR:-/Users/dlambrig/spark-3.5.5/jars/hadoop-client-runtime-3.3.4.jar}"
+COMMONS_LOGGING_JAR="${COMMONS_LOGGING_JAR:-/Users/dlambrig/spark-3.5.5/jars/commons-logging-1.1.3.jar}"
 
 usage() {
   cat <<'EOF'
@@ -408,7 +413,7 @@ run_flink_smoke_checks() {
 
   (
     cd "${PROJECT_ROOT}"
-    ./integration/flink_smoke.sh --fdb --no-start-server
+    ./integration/flink_smoke.sh --fdb --no-start-server --scenario basic,schema_evolution
   )
 
   FLINK_LOG="$(ls -1t "${LOG_DIR}"/flink_smoke_*.log 2>/dev/null | head -n1 || true)"
@@ -416,6 +421,133 @@ run_flink_smoke_checks() {
     echo "ERROR: Could not determine Flink smoke log for this run." >&2
     exit 1
   fi
+}
+
+require_flink_prereqs() {
+  if [[ -z "${FLINK_ICEBERG_RUNTIME_JAR}" ]]; then
+    FLINK_ICEBERG_RUNTIME_JAR="$(
+      find "${ICEBERG_HOME}/flink/v2.1/flink-runtime/build/libs" \
+        -maxdepth 1 \
+        -type f \
+        -name 'iceberg-flink-runtime-2.1-*.jar' \
+        ! -name '*-javadoc.jar' \
+        ! -name '*-sources.jar' \
+        ! -name '*-tests.jar' \
+        | sort \
+        | head -n1
+    )"
+  fi
+  if [[ -z "${FLINK_ICEBERG_RUNTIME_JAR}" || ! -f "${FLINK_ICEBERG_RUNTIME_JAR}" ]]; then
+    echo "ERROR: Flink checks require an iceberg-flink-runtime-2.1 jar." >&2
+    echo "Expected under: ${ICEBERG_HOME}/flink/v2.1/flink-runtime/build/libs/" >&2
+    echo "Set FLINK_ICEBERG_RUNTIME_JAR explicitly if needed." >&2
+    exit 1
+  fi
+
+  local dependency
+  for dependency in \
+    "${HADOOP_CLIENT_API_JAR}" \
+    "${HADOOP_CLIENT_RUNTIME_JAR}" \
+    "${COMMONS_LOGGING_JAR}"; do
+    if [[ ! -f "${dependency}" ]]; then
+      echo "ERROR: Missing Flink dependency jar: ${dependency}" >&2
+      exit 1
+    fi
+  done
+
+  if ! docker image inspect "${FLINK_IMAGE}" >/dev/null 2>&1; then
+    echo "ERROR: Docker image not available locally: ${FLINK_IMAGE}" >&2
+    echo "Pull it first: docker pull ${FLINK_IMAGE}" >&2
+    exit 1
+  fi
+}
+
+run_flink_sql_file() {
+  local sql_file="$1"
+  docker run --rm \
+    --add-host host.docker.internal:host-gateway \
+    -v "${sql_file}":/work/flink_rest_flow.sql:ro \
+    -v "${FLINK_ICEBERG_RUNTIME_JAR}":/opt/flink/lib/iceberg-flink-runtime.jar:ro \
+    -v "${HADOOP_CLIENT_API_JAR}":/opt/flink/lib/hadoop-client-api.jar:ro \
+    -v "${HADOOP_CLIENT_RUNTIME_JAR}":/opt/flink/lib/hadoop-client-runtime.jar:ro \
+    -v "${COMMONS_LOGGING_JAR}":/opt/flink/lib/commons-logging.jar:ro \
+    -v /tmp/iceberg_warehouse:/tmp/iceberg_warehouse \
+    "${FLINK_IMAGE}" \
+    sh -lc '/opt/flink/bin/start-cluster.sh && /opt/flink/bin/sql-client.sh embedded -f /work/flink_rest_flow.sql'
+}
+
+assert_flink_log_contains() {
+  local pattern="$1"
+  local message="$2"
+  if ! grep -Eq "${pattern}" "${FLINK_LOG}"; then
+    echo "ERROR: ${message}" >&2
+    echo "See Flink log: ${FLINK_LOG}" >&2
+    exit 1
+  fi
+}
+
+run_flink_restart_checks() {
+  local flink_ns="flink_fdb_${RUN_ID}"
+  local flink_table="orders"
+  local bootstrap_sql="${LOG_DIR}/fdb_flink_bootstrap_${RUN_ID}.sql"
+  local reload_sql="${LOG_DIR}/fdb_flink_reload_${RUN_ID}.sql"
+
+  echo "==> Flink bootstrap before restart"
+  cat > "${bootstrap_sql}" <<EOF
+SET 'execution.runtime-mode' = 'batch';
+SET 'table.dml-sync' = 'true';
+SET 'sql-client.execution.result-mode' = 'TABLEAU';
+CREATE CATALOG rest WITH (
+  'type' = 'iceberg',
+  'catalog-type' = 'rest',
+  'uri' = 'http://host.docker.internal:8181',
+  'warehouse' = 'file:///tmp/iceberg_warehouse'
+);
+USE CATALOG rest;
+CREATE DATABASE IF NOT EXISTS ${flink_ns};
+USE ${flink_ns};
+CREATE TABLE ${flink_table} (id BIGINT, amount DOUBLE);
+INSERT INTO ${flink_table} VALUES (1, 10.5), (2, 20.25);
+ALTER TABLE ${flink_table} ADD note STRING;
+INSERT INTO ${flink_table} VALUES (3, 30.75, 'evolved');
+SELECT COUNT(*) AS flink_pre_restart_count FROM ${flink_table};
+SELECT COUNT(note) AS flink_pre_restart_noted FROM ${flink_table};
+EOF
+  run_flink_sql_file "${bootstrap_sql}" >> "${FLINK_LOG}" 2>&1
+  assert_flink_log_contains '[|][[:space:]]*3[[:space:]]*[|]' "Flink bootstrap did not preserve the expected total row count before restart."
+  assert_flink_log_contains '[|][[:space:]]*1[[:space:]]*[|]' "Flink bootstrap did not preserve the expected evolved-column row count before restart."
+
+  echo "Stopping server for Flink restart checks..."
+  stop_server
+  require_port_free 8181 "Server"
+
+  echo "Restarting server for Flink reload checks..."
+  start_server
+
+  echo "==> Flink reload after restart"
+  cat > "${reload_sql}" <<EOF
+SET 'execution.runtime-mode' = 'batch';
+SET 'table.dml-sync' = 'true';
+SET 'sql-client.execution.result-mode' = 'TABLEAU';
+CREATE CATALOG rest WITH (
+  'type' = 'iceberg',
+  'catalog-type' = 'rest',
+  'uri' = 'http://host.docker.internal:8181',
+  'warehouse' = 'file:///tmp/iceberg_warehouse'
+);
+USE CATALOG rest;
+USE ${flink_ns};
+SELECT COUNT(*) AS flink_post_restart_count FROM ${flink_table};
+SELECT COUNT(note) AS flink_post_restart_noted FROM ${flink_table};
+DESCRIBE ${flink_table};
+DROP TABLE ${flink_table};
+USE CATALOG default_catalog;
+DROP DATABASE rest.${flink_ns};
+EOF
+  run_flink_sql_file "${reload_sql}" >> "${FLINK_LOG}" 2>&1
+  assert_flink_log_contains '[|][[:space:]]*3[[:space:]]*[|]' "Flink reload did not preserve the expected total row count after restart."
+  assert_flink_log_contains '[|][[:space:]]*1[[:space:]]*[|]' "Flink reload did not preserve the expected evolved-column row count after restart."
+  assert_flink_log_contains 'note[[:space:]]+[|][[:space:]]+STRING' "Flink reload did not show the evolved column after restart."
 }
 
 run_trino_and_expect() {
@@ -622,6 +754,7 @@ if [[ "${RUN_SPARK}" == "true" ]]; then
   require_spark_prereqs
 fi
 if [[ "${RUN_FLINK}" == "true" ]]; then
+  require_flink_prereqs
   if [[ ! -x "${PROJECT_ROOT}/integration/flink_smoke.sh" ]]; then
     echo "ERROR: Flink integration requires executable ${PROJECT_ROOT}/integration/flink_smoke.sh" >&2
     exit 1
@@ -766,6 +899,7 @@ if [[ "${START_SERVER}" == "true" ]]; then
   fi
   if [[ "${RUN_FLINK}" == "true" ]]; then
     run_flink_smoke_checks
+    run_flink_restart_checks
   fi
 else
   echo "Skipping restart/reload checks because --no-start-server was set."
