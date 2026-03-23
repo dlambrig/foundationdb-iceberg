@@ -18,27 +18,30 @@ dependencies {
 }
 
 application {
-    mainClass = 'Demo'
+    mainClass = 'IcebergRestServer'
+}
+
+def configureServerExec = { JavaExec task ->
+    task.systemProperty 'FDB_LIBRARY_PATH_FDB_C', '/usr/local/lib/libfdb_c.dylib'
+    def javaMajor = JavaVersion.current().majorVersion.toInteger()
+    if (javaMajor >= 21) {
+        task.jvmArgs '--enable-native-access=ALL-UNNAMED'
+    }
+    if (javaMajor >= 24) {
+        task.jvmArgs '--sun-misc-unsafe-memory-access=allow'
+    }
+    def clusterFile = file('fdb.cluster')
+    if (clusterFile.exists()) {
+        task.environment 'FDB_CLUSTER_FILE', clusterFile.absolutePath
+    }
+    def fdbProperty = System.getProperty('fdb')
+    if (fdbProperty != null) {
+        task.systemProperty 'fdb', fdbProperty
+    }
 }
 
 tasks.named('run', JavaExec) {
-    // Avoid JAVA_TOOL_OPTIONS env usage.
-    systemProperty 'FDB_LIBRARY_PATH_FDB_C', '/usr/local/lib/libfdb_c.dylib'
-
-    // Add JVM flags only on Java versions that support them.
-    def javaMajor = JavaVersion.current().majorVersion.toInteger()
-    if (javaMajor >= 21) {
-        jvmArgs '--enable-native-access=ALL-UNNAMED'
-    }
-    if (javaMajor >= 24) {
-        jvmArgs '--sun-misc-unsafe-memory-access=allow'
-    }
-
-    // Use local cluster file by default if present.
-    def clusterFile = file('fdb.cluster')
-    if (clusterFile.exists()) {
-        environment 'FDB_CLUSTER_FILE', clusterFile.absolutePath
-    }
+    configureServerExec(it)
 }
 
 tasks.register('runIcebergRestServer', JavaExec) {
@@ -46,35 +49,13 @@ tasks.register('runIcebergRestServer', JavaExec) {
     description = 'Runs a minimal Iceberg REST server on port 8181.'
     classpath = sourceSets.main.runtimeClasspath
     mainClass = 'IcebergRestServer'
-
-    // FoundationDB-friendly defaults for optional --fdb mode.
-    systemProperty 'FDB_LIBRARY_PATH_FDB_C', '/usr/local/lib/libfdb_c.dylib'
-    def javaMajor = JavaVersion.current().majorVersion.toInteger()
-    if (javaMajor >= 21) {
-        jvmArgs '--enable-native-access=ALL-UNNAMED'
-    }
-    if (javaMajor >= 24) {
-        jvmArgs '--sun-misc-unsafe-memory-access=allow'
-    }
-    def clusterFile = file('fdb.cluster')
-    if (clusterFile.exists()) {
-        environment 'FDB_CLUSTER_FILE', clusterFile.absolutePath
-    }
-
-    // Forward `-Dfdb=true` from Gradle invocation to the launched Java process.
-    def fdbProperty = System.getProperty('fdb')
-    if (fdbProperty != null) {
-        systemProperty 'fdb', fdbProperty
-    }
+    configureServerExec(it)
 }
 
 jar {
     manifest {
-        attributes(
-            'Main-Class': 'com.yourpackage.IcebergCatalogApplication' 
-        )
+        attributes('Main-Class': 'IcebergRestServer')
     }
-    // This ensures all dependencies are included in a "fat" JAR if needed
     from {
         configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
     }
