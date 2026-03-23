@@ -25,9 +25,9 @@ final class MetadataFileSupport {
     private MetadataFileSupport() {
     }
 
-    static void persistMetadataFile(String loadTableResponseJson) {
+    static void persistMetadataFile(String responseJson) {
         try {
-            JsonNode root = OBJECT_MAPPER.readTree(loadTableResponseJson);
+            JsonNode root = OBJECT_MAPPER.readTree(responseJson);
             String metadataLocation = root.path("metadata-location").asText(null);
             JsonNode metadata = root.get("metadata");
             if (metadataLocation == null || metadata == null || metadata.isMissingNode()) {
@@ -48,9 +48,9 @@ final class MetadataFileSupport {
         }
     }
 
-    static String extractMetadataLocation(String loadTableResponseJson) {
+    static String extractMetadataLocation(String responseJson) {
         try {
-            JsonNode root = OBJECT_MAPPER.readTree(loadTableResponseJson);
+            JsonNode root = OBJECT_MAPPER.readTree(responseJson);
             String metadataLocation = root.path("metadata-location").asText("");
             if (metadataLocation.isEmpty()) {
                 throw new IllegalArgumentException("Missing metadata-location");
@@ -61,7 +61,7 @@ final class MetadataFileSupport {
         }
     }
 
-    static String loadResponseFromMetadataLocation(String metadataLocation) {
+    static String loadCatalogResponseFromMetadataLocation(String metadataLocation) {
         try {
             Path metadataPath = resolveWritablePath(metadataLocation);
             if (metadataPath == null) {
@@ -113,7 +113,7 @@ final class MetadataFileSupport {
         }
     }
 
-    static String nextMetadataLocation(String currentMetadataLocation, String tableUuid) {
+    static String nextMetadataLocation(String currentMetadataLocation, String objectUuid) {
         URI uri = URI.create(currentMetadataLocation);
         Path currentPath = Paths.get(uri.getPath());
         String fileName = currentPath.getFileName().toString();
@@ -123,7 +123,7 @@ final class MetadataFileSupport {
         }
 
         int currentVersion = Integer.parseInt(matcher.group(1));
-        String effectiveUuid = (tableUuid == null || tableUuid.isEmpty()) ? matcher.group(2) : tableUuid;
+        String effectiveUuid = (objectUuid == null || objectUuid.isEmpty()) ? matcher.group(2) : objectUuid;
         String nextFileName = String.format("%05d-%s.metadata.json", currentVersion + 1, effectiveUuid);
         Path nextPath = currentPath.getParent().resolve(nextFileName);
 
