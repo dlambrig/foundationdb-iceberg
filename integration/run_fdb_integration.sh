@@ -10,6 +10,7 @@ SERVER_GRADLE_ARGS=(-Dfdb=true)
 CONCURRENT_ITERATIONS="${CONCURRENT_ITERATIONS:-20}"
 MIXED_CONFLICT_ITERATIONS="${MIXED_CONFLICT_ITERATIONS:-12}"
 WRITE_CYCLE_ITERATIONS="${WRITE_CYCLE_ITERATIONS:-18}"
+SPARK_CONCURRENT_ITERATIONS="${SPARK_CONCURRENT_ITERATIONS:-2}"
 
 START_SERVER=true
 RUN_SMOKE=true
@@ -341,6 +342,7 @@ require_spark_prereqs() {
 
 run_spark_sql_file() {
   local sql_file="$1"
+  local log_file="${2:-${SPARK_LOG}}"
   env JAVA_HOME="${SPARK_JAVA_HOME}" PATH="${SPARK_JAVA_HOME}/bin:${PATH}" "${SPARK_SQL_BIN}" \
     --master "${SPARK_MASTER}" \
     --jars "${ICEBERG_RUNTIME_JAR}" \
@@ -352,7 +354,7 @@ run_spark_sql_file() {
     --conf "spark.sql.catalog.${CATALOG_NAME}.warehouse=${WAREHOUSE_URI}" \
     --conf "spark.sql.warehouse.dir=${SPARK_STATE_DIR}/spark-warehouse" \
     --conf "spark.sql.catalog.${CATALOG_NAME}.io-impl=org.apache.iceberg.hadoop.HadoopFileIO" \
-    -f "${sql_file}" >> "${SPARK_LOG}" 2>&1
+    -f "${sql_file}" >> "${log_file}" 2>&1
 }
 
 assert_spark_log_contains() {
@@ -404,6 +406,78 @@ EOF
   run_spark_sql_file "${reload_sql}"
   assert_spark_log_contains '(^|[[:space:]])2($|[[:space:]])' "Spark reload did not preserve expected table/view row counts after restart."
   assert_spark_log_contains '(^|[[:space:]])1($|[[:space:]])' "Spark reload did not show a snapshot count after restart."
+}
+
+run_spark_concurrent_writer_checks() {
+  local spark_ns="spark_concurrent_${RUN_ID}"
+  local spark_table="orders"
+  local bootstrap_sql="${LOG_DIR}/fdb_spark_concurrent_bootstrap_${RUN_ID}.sql"
+  local verify_sql="${LOG_DIR}/fdb_spark_concurrent_verify_${RUN_ID}.sql"
+  local writer1_sql="${LOG_DIR}/fdb_spark_concurrent_writer1_${RUN_ID}.sql"
+  local writer2_sql="${LOG_DIR}/fdb_spark_concurrent_writer2_${RUN_ID}.sql"
+  local writer1_log="${LOG_DIR}/fdb_spark_concurrent_writer1_${RUN_ID}.log"
+  local writer2_log="${LOG_DIR}/fdb_spark_concurrent_writer2_${RUN_ID}.log"
+
+  echo "==> Concurrent Spark writer checks"
+  cat > "${bootstrap_sql}" <<EOF
+CREATE NAMESPACE IF NOT EXISTS ${CATALOG_NAME}.${spark_ns};
+DROP TABLE IF EXISTS ${CATALOG_NAME}.${spark_ns}.${spark_table};
+CREATE TABLE ${CATALOG_NAME}.${spark_ns}.${spark_table} (order_id BIGINT, amount DOUBLE) USING iceberg;
+EOF
+  : > "${SPARK_LOG}"
+  run_spark_sql_file "${bootstrap_sql}"
+
+  for ((i = 1; i <= SPARK_CONCURRENT_ITERATIONS; i++)); do
+    local base1 base2
+    base1=$(( (i - 1) * 200 + 1 ))
+    base2=$(( base1 + 100 ))
+
+    cat > "${writer1_sql}" <<EOF
+INSERT INTO ${CATALOG_NAME}.${spark_ns}.${spark_table}
+SELECT CAST(id AS BIGINT) AS order_id, CAST(id AS DOUBLE) AS amount
+FROM (
+  SELECT explode(sequence(${base1}, $((base1 + 99)))) AS id
+) s;
+EOF
+    cat > "${writer2_sql}" <<EOF
+INSERT INTO ${CATALOG_NAME}.${spark_ns}.${spark_table}
+SELECT CAST(id AS BIGINT) AS order_id, CAST(id AS DOUBLE) AS amount
+FROM (
+  SELECT explode(sequence(${base2}, $((base2 + 99)))) AS id
+) s;
+EOF
+
+    : > "${writer1_log}"
+    : > "${writer2_log}"
+    run_spark_sql_file "${writer1_sql}" "${writer1_log}" &
+    local pid1=$!
+    run_spark_sql_file "${writer2_sql}" "${writer2_log}" &
+    local pid2=$!
+
+    local status1=0
+    local status2=0
+    wait "${pid1}" || status1=$?
+    wait "${pid2}" || status2=$?
+
+    if [[ "${status1}" -ne 0 || "${status2}" -ne 0 ]]; then
+      echo "ERROR: Concurrent Spark writer iteration ${i} failed (statuses: ${status1}, ${status2})." >&2
+      echo "Writer logs:" >&2
+      echo "  ${writer1_log}" >&2
+      echo "  ${writer2_log}" >&2
+      exit 1
+    fi
+  done
+
+  cat > "${verify_sql}" <<EOF
+SELECT COUNT(*) AS total_rows FROM ${CATALOG_NAME}.${spark_ns}.${spark_table};
+SELECT COUNT(DISTINCT order_id) AS distinct_rows FROM ${CATALOG_NAME}.${spark_ns}.${spark_table};
+DROP TABLE ${CATALOG_NAME}.${spark_ns}.${spark_table};
+DROP NAMESPACE ${CATALOG_NAME}.${spark_ns};
+EOF
+  : > "${SPARK_LOG}"
+  run_spark_sql_file "${verify_sql}"
+  local expected_rows=$((SPARK_CONCURRENT_ITERATIONS * 200))
+  assert_spark_log_contains "(^|[[:space:]])${expected_rows}($|[[:space:]])" "Concurrent Spark writers did not preserve the expected total row count."
 }
 
 run_flink_smoke_checks() {
@@ -893,6 +967,7 @@ if [[ "${START_SERVER}" == "true" ]]; then
 
   if [[ "${RUN_SPARK}" == "true" ]]; then
     run_spark_restart_checks
+    run_spark_concurrent_writer_checks
   fi
   if [[ "${RUN_TRINO}" == "true" ]]; then
     run_trino_restart_checks

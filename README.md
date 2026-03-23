@@ -7,7 +7,7 @@ An implementation of the **Apache Iceberg REST Catalog** specification backed by
 
 ## 🚀 The Vision
 
-Traditional metastore-based catalog deployments can become a central bottleneck in high-concurrency or large-scale environments. This project uses
+This project uses
 FoundationDB’s strictly serializable transactions and optimistic concurrency control to provide a transactional metadata service for Iceberg REST catalog
 operations.
 
@@ -33,6 +33,23 @@ sequenceDiagram
 * **REST Spec Compliant:** Works out-of-the-box with any Iceberg-compatible engine (PyIceberg, Spark, Trino, Flink).
 * **ACID Foundations:** Uses FDB transactions to ensure table versions are never corrupted, even under heavy parallel write pressure.
 * **Stateless Scaling:** The REST tier is entirely stateless; scale your API nodes to match your query volume.
+
+## Proven Coverage
+
+The table below summarizes what is directly exercised today. It is meant to bound the compatibility claim, not overstate it.
+
+| Area | Directly exercised | Memory mode | FDB mode | Restart/reload covered | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Iceberg Open API RCK | Yes | Yes | No | No | `~/iceberg :iceberg-open-api:test` passes in this environment; latest run: 308 total, 290 passed, 18 skipped, 0 failed, 0 errors. |
+| Trino direct | Yes | Yes | Yes | Yes | Smoke and FDB integration cover table lifecycle, metadata tables, schema evolution, views, and FDB restart/readback. |
+| Spark direct | Yes | Yes | Yes | Yes | Smoke and FDB integration cover table lifecycle, schema evolution, overwrite, snapshots, replace-table, views, restart/readback, and concurrent writers against the same table. |
+| Flink direct | Yes | Yes | Yes | Yes | Smoke and FDB integration cover table lifecycle, schema evolution, and FDB restart/readback. |
+| REST-only integration | Yes | No | Yes | Yes | FDB integration also validates namespace/table/view pagination, metrics endpoint behavior, pointer stability, and conflict loops. |
+
+What this does not claim:
+* exhaustive compatibility with every engine path or every Iceberg client
+* full production hardening beyond the exercised integration matrix above
+* complete coverage of all optional or emerging Iceberg features
 
 ## 🛠️ Getting Started
 
