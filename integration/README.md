@@ -66,6 +66,7 @@ This script:
 - validates restart/reload behavior for both table and view metadata pointers
 - validates direct Trino write/restart/read behavior against the FDB-backed catalog, including table/view reload and `$snapshots` after restart
 - runs a direct Spark write/restart/read cycle against the FDB-backed catalog (unless `--no-spark` is used)
+- runs concurrent Spark writer checks against the same FDB-backed table and verifies final row counts (unless `--no-spark` is used)
 - runs direct Flink schema/table checks against the FDB-backed catalog (unless `--no-flink` is used)
 - validates Flink schema evolution and Flink readback after catalog-server restart in FDB mode
 - validates namespace/table/view pagination behavior via REST APIs
@@ -89,6 +90,7 @@ Stress knobs (optional env vars):
 CONCURRENT_ITERATIONS=20
 MIXED_CONFLICT_ITERATIONS=12
 WRITE_CYCLE_ITERATIONS=18
+SPARK_CONCURRENT_ITERATIONS=2
 ```
 
 Spark-specific overrides:
