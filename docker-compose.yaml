@@ -13,7 +13,6 @@ services:
     ports:
       - "8181:8181"
     environment:
-      - SPRING_PROFILES_ACTIVE=docker
       - FDB_NETWORK_OPTIONS=TraceEnable
     volumes:
       - fdb_config:/etc/foundationdb
