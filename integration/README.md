@@ -66,7 +66,8 @@ This script:
 - validates restart/reload behavior for both table and view metadata pointers
 - validates direct Trino write/restart/read behavior against the FDB-backed catalog, including table/view reload and `$snapshots` after restart
 - runs a direct Spark write/restart/read cycle against the FDB-backed catalog (unless `--no-spark` is used)
-- runs a direct Flink create/insert/query/drop smoke flow against the FDB-backed catalog (unless `--no-flink` is used)
+- runs direct Flink schema/table checks against the FDB-backed catalog (unless `--no-flink` is used)
+- validates Flink schema evolution and Flink readback after catalog-server restart in FDB mode
 - validates namespace/table/view pagination behavior via REST APIs
 - validates longer repeated concurrent writer conflict behavior (one commit succeeds, one conflicts per iteration)
 - validates mixed update-action conflict behavior under concurrent commits
@@ -231,11 +232,8 @@ Force the script to replace an unhealthy/conflicting local server on the same po
 ```
 
 Current direct Flink smoke coverage includes:
-- create REST catalog
-- create namespace and table
-- insert rows through Flink
-- query row count through Flink
-- drop table and namespace
+- basic lifecycle: create REST catalog, create namespace/table, insert rows, query row count, drop objects
+- schema evolution: `ALTER TABLE ... ADD note STRING`, insert using evolved schema, and validate the evolved column count
 
 Notes:
 - This script uses the local Docker image `flink:2.1.0-scala_2.12-java17` by default.
