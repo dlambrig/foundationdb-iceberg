@@ -27,6 +27,7 @@ REST_URI="${REST_URI:-http://localhost:8181}"
 SPARK_LOG="${LOG_DIR}/fdb_spark_${RUN_ID}.log"
 SPARK_STATE_DIR="${LOG_DIR}/fdb_spark_state_${RUN_ID}"
 ICEBERG_RUNTIME_JAR="${ICEBERG_RUNTIME_JAR:-}"
+SPARK_JAVA_HOME="${SPARK_JAVA_HOME:-}"
 TRINO_HOME="${TRINO_HOME:-/Users/dlambrig/trino}"
 TRINO_SERVER_URL="${TRINO_SERVER_URL:-http://localhost:8080}"
 TRINO_ETC="${TRINO_ETC:-${TRINO_HOME}/etc}"
@@ -222,6 +223,46 @@ spark_version_output() {
   "${SPARK_SQL_BIN}" --version 2>&1
 }
 
+find_compatible_spark_sql() {
+  local candidate candidates=()
+
+  if [[ -n "${SPARK_SQL_BIN:-}" ]]; then
+    candidates+=("${SPARK_SQL_BIN}")
+  fi
+
+  candidates+=(
+    "${HOME}/spark-3.5.5/bin/spark-sql"
+    "${HOME}/spark-3.5.4/bin/spark-sql"
+    "${HOME}/spark-3.5.3/bin/spark-sql"
+    "${HOME}/spark-3.5.2/bin/spark-sql"
+    "${HOME}/spark-3.5.1/bin/spark-sql"
+    "${HOME}/spark-3.5.0/bin/spark-sql"
+  )
+
+  if command -v spark-sql >/dev/null 2>&1; then
+    candidates+=("$(command -v spark-sql)")
+  fi
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -z "${candidate}" ]]; then
+      continue
+    fi
+    if [[ ! -x "${candidate}" ]]; then
+      continue
+    fi
+    local version_output spark_version_line scala_version_line
+    version_output="$("${candidate}" --version 2>&1 || true)"
+    spark_version_line="$(printf '%s\n' "${version_output}" | rg -m1 'version [0-9]+\.[0-9]+\.[0-9]+' || true)"
+    scala_version_line="$(printf '%s\n' "${version_output}" | rg -m1 'Scala version [0-9]+\.[0-9]+' || true)"
+    if [[ "${spark_version_line}" == *"version ${SPARK_VERSION}."* ]] && [[ "${scala_version_line}" == *"Scala version ${SCALA_VERSION}."* ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 validate_spark_binary() {
   local version_output spark_version_line scala_version_line
   version_output="$(spark_version_output)"
@@ -232,21 +273,36 @@ validate_spark_binary() {
     echo "ERROR: spark-sql version does not match SPARK_VERSION=${SPARK_VERSION}" >&2
     echo "Detected: ${spark_version_line:-unknown}" >&2
     echo "Set SPARK_SQL_BIN to a Spark ${SPARK_VERSION}.x binary." >&2
-    exit 1
+    return 1
   fi
 
   if [[ "${scala_version_line}" != *"Scala version ${SCALA_VERSION}."* ]]; then
     echo "ERROR: spark-sql Scala version does not match SCALA_VERSION=${SCALA_VERSION}" >&2
     echo "Detected: ${scala_version_line:-unknown}" >&2
     echo "Set SPARK_SQL_BIN to a Spark build using Scala ${SCALA_VERSION}.x." >&2
-    exit 1
+    return 1
   fi
 }
 
 require_spark_prereqs() {
   if ! command -v "${SPARK_SQL_BIN}" >/dev/null 2>&1; then
-    echo "ERROR: Spark checks require spark-sql (${SPARK_SQL_BIN})" >&2
-    exit 1
+    local compatible_spark_sql
+    compatible_spark_sql="$(find_compatible_spark_sql || true)"
+    if [[ -n "${compatible_spark_sql}" ]]; then
+      SPARK_SQL_BIN="${compatible_spark_sql}"
+    else
+      echo "ERROR: Spark checks require spark-sql (${SPARK_SQL_BIN})" >&2
+      exit 1
+    fi
+  fi
+
+  if ! validate_spark_binary >/dev/null 2>&1; then
+    local compatible_spark_sql
+    compatible_spark_sql="$(find_compatible_spark_sql || true)"
+    if [[ -n "${compatible_spark_sql}" && "${compatible_spark_sql}" != "${SPARK_SQL_BIN}" ]]; then
+      echo "Using compatible Spark binary: ${compatible_spark_sql}"
+      SPARK_SQL_BIN="${compatible_spark_sql}"
+    fi
   fi
 
   validate_spark_binary
@@ -259,11 +315,21 @@ require_spark_prereqs() {
     echo "Set ICEBERG_RUNTIME_JAR explicitly or build the runtime jar first." >&2
     exit 1
   fi
+
+  if [[ -z "${SPARK_JAVA_HOME}" ]]; then
+    if command -v /usr/libexec/java_home >/dev/null 2>&1; then
+      SPARK_JAVA_HOME="$(/usr/libexec/java_home -v 21 2>/dev/null || true)"
+    fi
+  fi
+  if [[ -z "${SPARK_JAVA_HOME}" || ! -d "${SPARK_JAVA_HOME}" ]]; then
+    echo "ERROR: Spark checks require JDK 21. Set SPARK_JAVA_HOME to a JDK 21 installation." >&2
+    exit 1
+  fi
 }
 
 run_spark_sql_file() {
   local sql_file="$1"
-  "${SPARK_SQL_BIN}" \
+  env JAVA_HOME="${SPARK_JAVA_HOME}" PATH="${SPARK_JAVA_HOME}/bin:${PATH}" "${SPARK_SQL_BIN}" \
     --master "${SPARK_MASTER}" \
     --jars "${ICEBERG_RUNTIME_JAR}" \
     --driver-java-options "-Dderby.system.home=${SPARK_STATE_DIR}" \

@@ -56,6 +56,8 @@ cd /Users/dlambrig/apple/foundationdb-iceberg
 ./integration/run_fdb_integration.sh
 ```
 
+This is the main compatibility gate for the project. It exercises the broadest direct end-to-end coverage against the FDB-backed catalog.
+
 This script:
 - runs `trino_smoke.sh --fdb` (unless `--no-smoke` is used)
 - starts `IcebergRestServer` in FDB mode
@@ -90,8 +92,13 @@ Spark-specific overrides:
 
 ```bash
 SPARK_SQL_BIN=~/spark-3.5.5/bin/spark-sql
+SPARK_JAVA_HOME=$(/usr/libexec/java_home -v 21)
 ICEBERG_RUNTIME_JAR=/path/to/iceberg-spark-runtime-3.5_2.12-*.jar
 ```
+
+Notes:
+- By default the script will auto-select a compatible Spark 3.5 / Scala 2.12 `spark-sql` binary if `PATH` points to a different Spark line.
+- The script runs Spark using JDK 21 automatically on macOS when available. Override with `SPARK_JAVA_HOME` if needed.
 
 Use already-running server on `:8181`:
 
