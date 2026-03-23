@@ -66,6 +66,7 @@ This script:
 - validates restart/reload behavior for both table and view metadata pointers
 - validates direct Trino write/restart/read behavior against the FDB-backed catalog, including table/view reload and `$snapshots` after restart
 - runs a direct Spark write/restart/read cycle against the FDB-backed catalog (unless `--no-spark` is used)
+- runs a direct Flink create/insert/query/drop smoke flow against the FDB-backed catalog (unless `--no-flink` is used)
 - validates namespace/table/view pagination behavior via REST APIs
 - validates longer repeated concurrent writer conflict behavior (one commit succeeds, one conflicts per iteration)
 - validates mixed update-action conflict behavior under concurrent commits
@@ -77,6 +78,7 @@ Options:
 ./integration/run_fdb_integration.sh --no-smoke
 ./integration/run_fdb_integration.sh --no-trino
 ./integration/run_fdb_integration.sh --no-spark
+./integration/run_fdb_integration.sh --no-flink
 ./integration/run_fdb_integration.sh --no-start-server
 ```
 
@@ -199,6 +201,56 @@ Notes:
 - If a conflicting listener exists but is not a healthy Iceberg REST server, use `--replace-server` to restart it.
 - Logs are written under `integration/logs/spark_smoke_<timestamp>.log`.
 - Per-scenario SQL files are written under `integration/logs/` for the duration of the run.
+
+## Run Flink Smoke (Against foundationdb-iceberg)
+
+Run a direct Flink SQL smoke flow against this repo's REST server using a Dockerized
+Flink SQL client and a local Flink mini cluster inside the container:
+
+```bash
+cd /Users/dlambrig/apple/foundationdb-iceberg
+./integration/flink_smoke.sh
+```
+
+FDB-backed server mode:
+
+```bash
+./integration/flink_smoke.sh --fdb
+```
+
+Use existing server:
+
+```bash
+./integration/flink_smoke.sh --no-start-server
+```
+
+Force the script to replace an unhealthy/conflicting local server on the same port:
+
+```bash
+./integration/flink_smoke.sh --replace-server
+```
+
+Current direct Flink smoke coverage includes:
+- create REST catalog
+- create namespace and table
+- insert rows through Flink
+- query row count through Flink
+- drop table and namespace
+
+Notes:
+- This script uses the local Docker image `flink:2.1.0-scala_2.12-java17` by default.
+- It requires the Iceberg Flink runtime jar under:
+  - `~/iceberg/flink/v2.1/flink-runtime/build/libs/`
+- It also mounts Hadoop support jars from the local Spark 3.5.5 distribution by default:
+  - `hadoop-client-api-3.3.4.jar`
+  - `hadoop-client-runtime-3.3.4.jar`
+  - `commons-logging-1.1.3.jar`
+- You can override those paths with:
+  - `FLINK_ICEBERG_RUNTIME_JAR`
+  - `HADOOP_CLIENT_API_JAR`
+  - `HADOOP_CLIENT_RUNTIME_JAR`
+  - `COMMONS_LOGGING_JAR`
+- Logs are written under `integration/logs/flink_smoke_<timestamp>.log`.
 
 ## Prerequisites
 

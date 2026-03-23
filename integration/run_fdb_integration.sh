@@ -15,6 +15,7 @@ START_SERVER=true
 RUN_SMOKE=true
 RUN_TRINO=true
 RUN_SPARK=true
+RUN_FLINK=true
 
 SPARK_SQL_BIN="${SPARK_SQL_BIN:-spark-sql}"
 SPARK_MASTER="${SPARK_MASTER:-local[2]}"
@@ -35,15 +36,17 @@ TRINO_CLI_JAR="${TRINO_CLI_JAR:-}"
 TRINO_SERVER_DIR="${TRINO_SERVER_DIR:-}"
 TRINO_LAUNCHER="${TRINO_LAUNCHER:-}"
 TRINO_RUNTIME_ETC=""
+FLINK_LOG=""
 
 usage() {
   cat <<'EOF'
-Usage: ./integration/run_fdb_integration.sh [--no-smoke] [--no-trino] [--no-spark] [--no-start-server]
+Usage: ./integration/run_fdb_integration.sh [--no-smoke] [--no-trino] [--no-spark] [--no-flink] [--no-start-server]
 
 Options:
   --no-smoke         Skip ./integration/trino_smoke.sh --fdb pre-check.
   --no-trino         Skip direct Trino write/restart/read checks.
   --no-spark         Skip direct Spark write/restart/read checks.
+  --no-flink         Skip direct Flink create/insert/query/drop checks.
   --no-start-server  Use an already-running server on localhost:8181 for REST checks.
   -h                 Show help.
 EOF
@@ -61,6 +64,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-trino)
       RUN_TRINO=false
+      shift
+      ;;
+    --no-flink)
+      RUN_FLINK=false
       shift
       ;;
     --no-start-server)
@@ -394,6 +401,23 @@ EOF
   assert_spark_log_contains '(^|[[:space:]])1($|[[:space:]])' "Spark reload did not show a snapshot count after restart."
 }
 
+run_flink_smoke_checks() {
+  echo "==> Flink smoke checks"
+  local before_log=""
+  before_log="$(ls -1t "${LOG_DIR}"/flink_smoke_*.log 2>/dev/null | head -n1 || true)"
+
+  (
+    cd "${PROJECT_ROOT}"
+    ./integration/flink_smoke.sh --fdb --no-start-server
+  )
+
+  FLINK_LOG="$(ls -1t "${LOG_DIR}"/flink_smoke_*.log 2>/dev/null | head -n1 || true)"
+  if [[ -z "${FLINK_LOG}" || "${FLINK_LOG}" == "${before_log}" ]]; then
+    echo "ERROR: Could not determine Flink smoke log for this run." >&2
+    exit 1
+  fi
+}
+
 run_trino_and_expect() {
   local name="$1"
   local sql="$2"
@@ -597,6 +621,12 @@ fi
 if [[ "${RUN_SPARK}" == "true" ]]; then
   require_spark_prereqs
 fi
+if [[ "${RUN_FLINK}" == "true" ]]; then
+  if [[ ! -x "${PROJECT_ROOT}/integration/flink_smoke.sh" ]]; then
+    echo "ERROR: Flink integration requires executable ${PROJECT_ROOT}/integration/flink_smoke.sh" >&2
+    exit 1
+  fi
+fi
 
 if [[ "${RUN_SMOKE}" == "true" ]]; then
   echo "==> Running Trino smoke in FDB mode"
@@ -734,6 +764,9 @@ if [[ "${START_SERVER}" == "true" ]]; then
   if [[ "${RUN_TRINO}" == "true" ]]; then
     run_trino_restart_checks
   fi
+  if [[ "${RUN_FLINK}" == "true" ]]; then
+    run_flink_smoke_checks
+  fi
 else
   echo "Skipping restart/reload checks because --no-start-server was set."
 fi
@@ -841,4 +874,7 @@ if [[ "${RUN_SPARK}" == "true" ]]; then
 fi
 if [[ "${RUN_TRINO}" == "true" ]]; then
   echo "Trino log: ${TRINO_LOG}"
+fi
+if [[ "${RUN_FLINK}" == "true" && -n "${FLINK_LOG}" ]]; then
+  echo "Flink log: ${FLINK_LOG}"
 fi
