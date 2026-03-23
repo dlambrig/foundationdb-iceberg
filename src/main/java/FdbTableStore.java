@@ -29,12 +29,12 @@ class FdbTableStore implements TableStore {
         if (metadataLocation == null) {
             return null;
         }
-        return IcebergRestServer.loadTableResponseFromMetadataLocation(metadataLocation);
+        return MetadataFileSupport.loadResponseFromMetadataLocation(metadataLocation);
     }
 
     @Override
     public void putTableResponse(String namespace, String table, String responseJson) {
-        String metadataLocation = IcebergRestServer.extractMetadataLocation(responseJson);
+        String metadataLocation = MetadataFileSupport.extractMetadataLocation(responseJson);
         database.run(context -> {
             byte[] key = Tuple.from("iceberg-rest-server", "table", namespace, table).pack();
             context.ensureActive().set(key, metadataLocation.getBytes(StandardCharsets.UTF_8));
@@ -55,18 +55,18 @@ class FdbTableStore implements TableStore {
             String existingResponseJson;
             if (tableExists) {
                 String currentMetadataLocation = new String(existing, StandardCharsets.UTF_8);
-                existingResponseJson = IcebergRestServer.loadTableResponseFromMetadataLocation(currentMetadataLocation);
+                existingResponseJson = MetadataFileSupport.loadResponseFromMetadataLocation(currentMetadataLocation);
             } else {
                 existingResponseJson = IcebergRestServer.buildEmptyTableResponseJson(namespace, table);
             }
             String updatedResponseJson = IcebergRestServer.applyCommitToTableResponseJson(existingResponseJson, commitRequestBody, tableExists);
             List<String> metadataFilesToDelete = tableExists
-                    ? IcebergRestServer.collectMetadataFilesToDeleteAfterCommit(existingResponseJson, updatedResponseJson)
+                    ? MetadataFileSupport.collectMetadataFilesToDeleteAfterCommit(existingResponseJson, updatedResponseJson)
                     : List.of();
-            String updatedMetadataLocation = IcebergRestServer.extractMetadataLocation(updatedResponseJson);
-            IcebergRestServer.persistMetadataFile(updatedResponseJson);
+            String updatedMetadataLocation = MetadataFileSupport.extractMetadataLocation(updatedResponseJson);
+            MetadataFileSupport.persistMetadataFile(updatedResponseJson);
             context.ensureActive().set(key, updatedMetadataLocation.getBytes(StandardCharsets.UTF_8));
-            IcebergRestServer.deleteMetadataFilesQuietly(metadataFilesToDelete);
+            MetadataFileSupport.deleteMetadataFilesQuietly(metadataFilesToDelete);
             return updatedResponseJson;
         });
     }

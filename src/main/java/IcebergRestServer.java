@@ -38,7 +38,6 @@ public class IcebergRestServer {
     private static final String TABLES_SEGMENT = "/tables";
     private static final String VIEWS_SEGMENT = "/views";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    private static final Path DEFAULT_LOCAL_ROOT = Paths.get(System.getProperty("java.io.tmpdir"));
     private static final String DEFAULT_WAREHOUSE_LOCATION = "file:///tmp/iceberg_warehouse";
     private static final List<String> SUPPORTED_ENDPOINTS = List.of(
             "GET /v1/{prefix}/namespaces",
@@ -1090,7 +1089,7 @@ public class IcebergRestServer {
         applyMetadataRetentionPolicy(metadata, metadataLog);
 
         String tableUuid = metadata.path("table-uuid").asText("");
-        String nextMetadataLocation = nextMetadataLocation(currentMetadataLocation, tableUuid);
+        String nextMetadataLocation = MetadataFileSupport.nextMetadataLocation(currentMetadataLocation, tableUuid);
         updatedRoot.put("metadata-location", nextMetadataLocation);
 
         try {
@@ -1271,7 +1270,7 @@ public class IcebergRestServer {
         metadataLog.add(metadataLogEntry);
 
         String viewUuid = metadata.path("view-uuid").asText("");
-        String nextMetadataLocation = nextMetadataLocation(currentMetadataLocation, viewUuid);
+        String nextMetadataLocation = MetadataFileSupport.nextMetadataLocation(currentMetadataLocation, viewUuid);
         updatedRoot.put("metadata-location", nextMetadataLocation);
 
         try {
@@ -1680,146 +1679,6 @@ public class IcebergRestServer {
             throw new IllegalArgumentException(requirementType + " requires valid UUID");
         }
         return value;
-    }
-
-    static void persistMetadataFile(String loadTableResponseJson) {
-        try {
-            JsonNode root = OBJECT_MAPPER.readTree(loadTableResponseJson);
-            String metadataLocation = root.path("metadata-location").asText(null);
-            JsonNode metadata = root.get("metadata");
-            if (metadataLocation == null || metadata == null || metadata.isMissingNode()) {
-                return;
-            }
-
-            Path metadataPath = resolveWritablePath(metadataLocation);
-            if (metadataPath == null) {
-                return;
-            }
-            Path parent = metadataPath.getParent();
-            if (parent != null) {
-                Files.createDirectories(parent);
-            }
-            Files.writeString(metadataPath, OBJECT_MAPPER.writeValueAsString(metadata), StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to persist metadata file", e);
-        }
-    }
-
-    static String extractMetadataLocation(String loadTableResponseJson) {
-        try {
-            JsonNode root = OBJECT_MAPPER.readTree(loadTableResponseJson);
-            String metadataLocation = root.path("metadata-location").asText("");
-            if (metadataLocation.isEmpty()) {
-                throw new IllegalArgumentException("Missing metadata-location");
-            }
-            return metadataLocation;
-        } catch (JsonProcessingException e) {
-            throw new IllegalArgumentException("Invalid JSON response payload");
-        }
-    }
-
-    static String loadTableResponseFromMetadataLocation(String metadataLocation) {
-        try {
-            Path metadataPath = resolveWritablePath(metadataLocation);
-            if (metadataPath == null) {
-                throw new IllegalArgumentException("Unsupported metadata-location scheme: " + metadataLocation);
-            }
-            String metadataContent = Files.readString(metadataPath, StandardCharsets.UTF_8);
-            JsonNode metadata = OBJECT_MAPPER.readTree(metadataContent);
-            ObjectNode response = OBJECT_MAPPER.createObjectNode();
-            response.put("metadata-location", metadataLocation);
-            response.set("metadata", metadata);
-            response.putObject("config");
-            return OBJECT_MAPPER.writeValueAsString(response);
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to read metadata file: " + metadataLocation, e);
-        }
-    }
-
-    static List<String> collectMetadataFilesToDeleteAfterCommit(String existingResponseJson, String updatedResponseJson) {
-        try {
-            JsonNode existingRoot = OBJECT_MAPPER.readTree(existingResponseJson);
-            JsonNode updatedRoot = OBJECT_MAPPER.readTree(updatedResponseJson);
-
-            if (!isMetadataDeleteAfterCommitEnabled(updatedRoot.path("metadata").path("properties"))) {
-                return Collections.emptyList();
-            }
-
-            Set<String> oldRefs = collectTrackedMetadataFiles(existingRoot);
-            Set<String> newRefs = collectTrackedMetadataFiles(updatedRoot);
-            oldRefs.removeAll(newRefs);
-            if (oldRefs.isEmpty()) {
-                return Collections.emptyList();
-            }
-            return new ArrayList<>(oldRefs);
-        } catch (JsonProcessingException e) {
-            throw new IllegalArgumentException("Invalid JSON response payload");
-        }
-    }
-
-    static void deleteMetadataFilesQuietly(List<String> metadataLocations) {
-        for (String metadataLocation : metadataLocations) {
-            try {
-                Path metadataPath = resolveWritablePath(metadataLocation);
-                if (metadataPath != null) {
-                    Files.deleteIfExists(metadataPath);
-                }
-            } catch (Exception ignored) {
-                // Best-effort cleanup; commit metadata pointer changes must not be rolled back.
-            }
-        }
-    }
-
-    private static Set<String> collectTrackedMetadataFiles(JsonNode responseRoot) {
-        Set<String> refs = new LinkedHashSet<>();
-        String current = responseRoot.path("metadata-location").asText("");
-        if (!current.isEmpty()) {
-            refs.add(current);
-        }
-
-        JsonNode metadataLog = responseRoot.path("metadata").path("metadata-log");
-        if (metadataLog.isArray()) {
-            for (JsonNode entry : metadataLog) {
-                String metadataFile = entry.path("metadata-file").asText("");
-                if (!metadataFile.isEmpty()) {
-                    refs.add(metadataFile);
-                }
-            }
-        }
-        return refs;
-    }
-
-    private static String nextMetadataLocation(String currentMetadataLocation, String tableUuid) {
-        URI uri = URI.create(currentMetadataLocation);
-        Path currentPath = Paths.get(uri.getPath());
-        String fileName = currentPath.getFileName().toString();
-        Matcher matcher = METADATA_FILE_PATTERN.matcher(fileName);
-        if (!matcher.matches()) {
-            throw new IllegalArgumentException("Invalid metadata file name: " + fileName);
-        }
-
-        int currentVersion = Integer.parseInt(matcher.group(1));
-        String effectiveUuid = (tableUuid == null || tableUuid.isEmpty()) ? matcher.group(2) : tableUuid;
-        String nextFileName = String.format("%05d-%s.metadata.json", currentVersion + 1, effectiveUuid);
-        Path nextPath = currentPath.getParent().resolve(nextFileName);
-
-        return URI.create(uri.getScheme() + "://" + nextPath.toString()).toString();
-    }
-
-    static Path resolveWritablePath(String location) {
-        URI uri = URI.create(location);
-        String scheme = uri.getScheme();
-        if ("file".equalsIgnoreCase(scheme)) {
-            return Paths.get(uri);
-        }
-        if ("local".equalsIgnoreCase(scheme)) {
-            String relativePath = uri.getPath();
-            while (relativePath.startsWith("/")) {
-                relativePath = relativePath.substring(1);
-            }
-            return DEFAULT_LOCAL_ROOT.resolve(relativePath).normalize();
-        }
-        return null;
     }
 
     private static ArrayNode ensureArray(ObjectNode parent, String fieldName) {
@@ -2250,7 +2109,7 @@ public class IcebergRestServer {
                 sendIcebergError(exchange, 404, "Table not found: " + namespace + "." + table, ERROR_TYPE_NO_SUCH_TABLE, method, path);
                 return;
             }
-            persistMetadataFile(responseJson);
+            MetadataFileSupport.persistMetadataFile(responseJson);
             tableStore.putTableResponse(namespace, table, responseJson);
             sendJson(exchange, 200, responseJson, method, path);
         }
@@ -2261,7 +2120,7 @@ public class IcebergRestServer {
                 sendIcebergError(exchange, 404, "View not found: " + namespace + "." + view, ERROR_TYPE_NO_SUCH_VIEW, method, path);
                 return;
             }
-            persistMetadataFile(responseJson);
+            MetadataFileSupport.persistMetadataFile(responseJson);
             viewStore.putViewResponse(namespace, view, responseJson);
             sendJson(exchange, 200, responseJson, method, path);
         }
@@ -2375,7 +2234,7 @@ public class IcebergRestServer {
             boolean stageCreate = root.path("stage-create").asBoolean(false);
             if (!stageCreate) {
                 tableStore.putTableResponse(namespace, tableName, loadTableResponseJson);
-                IcebergRestServer.persistMetadataFile(loadTableResponseJson);
+                MetadataFileSupport.persistMetadataFile(loadTableResponseJson);
             }
             sendJson(exchange, 200, loadTableResponseJson, method, path);
         }
@@ -2449,7 +2308,7 @@ public class IcebergRestServer {
             boolean stageCreate = root.path("stage-create").asBoolean(false);
             if (!stageCreate) {
                 viewStore.putViewResponse(namespace, viewName, loadViewResponseJson);
-                IcebergRestServer.persistMetadataFile(loadViewResponseJson);
+                MetadataFileSupport.persistMetadataFile(loadViewResponseJson);
             }
             sendJson(exchange, 200, loadViewResponseJson, method, path);
         }

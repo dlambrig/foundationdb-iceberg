@@ -29,12 +29,12 @@ class FdbViewStore implements ViewStore {
         if (metadataLocation == null) {
             return null;
         }
-        return IcebergRestServer.loadTableResponseFromMetadataLocation(metadataLocation);
+        return MetadataFileSupport.loadResponseFromMetadataLocation(metadataLocation);
     }
 
     @Override
     public void putViewResponse(String namespace, String view, String responseJson) {
-        String metadataLocation = IcebergRestServer.extractMetadataLocation(responseJson);
+        String metadataLocation = MetadataFileSupport.extractMetadataLocation(responseJson);
         database.run(context -> {
             byte[] key = Tuple.from("iceberg-rest-server", "view", namespace, view).pack();
             context.ensureActive().set(key, metadataLocation.getBytes(StandardCharsets.UTF_8));
@@ -52,10 +52,10 @@ class FdbViewStore implements ViewStore {
             }
 
             String currentMetadataLocation = new String(existing, StandardCharsets.UTF_8);
-            String existingResponseJson = IcebergRestServer.loadTableResponseFromMetadataLocation(currentMetadataLocation);
+            String existingResponseJson = MetadataFileSupport.loadResponseFromMetadataLocation(currentMetadataLocation);
             String updatedResponseJson = IcebergRestServer.applyCommitToViewResponseJson(existingResponseJson, commitRequestBody);
-            String updatedMetadataLocation = IcebergRestServer.extractMetadataLocation(updatedResponseJson);
-            IcebergRestServer.persistMetadataFile(updatedResponseJson);
+            String updatedMetadataLocation = MetadataFileSupport.extractMetadataLocation(updatedResponseJson);
+            MetadataFileSupport.persistMetadataFile(updatedResponseJson);
             context.ensureActive().set(key, updatedMetadataLocation.getBytes(StandardCharsets.UTF_8));
             return updatedResponseJson;
         });

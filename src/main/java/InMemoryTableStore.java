@@ -13,12 +13,12 @@ class InMemoryTableStore implements TableStore {
         if (metadataLocation == null) {
             return null;
         }
-        return IcebergRestServer.loadTableResponseFromMetadataLocation(metadataLocation);
+        return MetadataFileSupport.loadResponseFromMetadataLocation(metadataLocation);
     }
 
     @Override
     public synchronized void putTableResponse(String namespace, String table, String responseJson) {
-        String metadataLocation = IcebergRestServer.extractMetadataLocation(responseJson);
+        String metadataLocation = MetadataFileSupport.extractMetadataLocation(responseJson);
         tableMetadataLocations.put(key(namespace, table), metadataLocation);
     }
 
@@ -31,16 +31,16 @@ class InMemoryTableStore implements TableStore {
         }
 
         String existingResponseJson = tableExists
-                ? IcebergRestServer.loadTableResponseFromMetadataLocation(currentMetadataLocation)
+                ? MetadataFileSupport.loadResponseFromMetadataLocation(currentMetadataLocation)
                 : IcebergRestServer.buildEmptyTableResponseJson(namespace, table);
         String updatedResponseJson = IcebergRestServer.applyCommitToTableResponseJson(existingResponseJson, commitRequestBody, tableExists);
         List<String> metadataFilesToDelete = tableExists
-                ? IcebergRestServer.collectMetadataFilesToDeleteAfterCommit(existingResponseJson, updatedResponseJson)
+                ? MetadataFileSupport.collectMetadataFilesToDeleteAfterCommit(existingResponseJson, updatedResponseJson)
                 : List.of();
-        String updatedMetadataLocation = IcebergRestServer.extractMetadataLocation(updatedResponseJson);
-        IcebergRestServer.persistMetadataFile(updatedResponseJson);
+        String updatedMetadataLocation = MetadataFileSupport.extractMetadataLocation(updatedResponseJson);
+        MetadataFileSupport.persistMetadataFile(updatedResponseJson);
         tableMetadataLocations.put(key(namespace, table), updatedMetadataLocation);
-        IcebergRestServer.deleteMetadataFilesQuietly(metadataFilesToDelete);
+        MetadataFileSupport.deleteMetadataFilesQuietly(metadataFilesToDelete);
         return updatedResponseJson;
     }
 
