@@ -38,6 +38,7 @@ By default this starts both:
 Current direct Trino smoke coverage includes:
 - schema/table lifecycle
 - inserts and reads
+- DML coverage (`DELETE`, `UPDATE`, `MERGE`)
 - metadata tables (`$snapshots`, `$history`, `$files`, `$manifests`)
 - schema evolution (`ADD COLUMN` + post-read validation)
 - view lifecycle
@@ -91,6 +92,7 @@ CONCURRENT_ITERATIONS=20
 MIXED_CONFLICT_ITERATIONS=12
 WRITE_CYCLE_ITERATIONS=18
 SPARK_CONCURRENT_ITERATIONS=2
+TRINO_CONCURRENT_ITERATIONS=2
 ```
 
 Spark-specific overrides:
@@ -104,6 +106,44 @@ ICEBERG_RUNTIME_JAR=/path/to/iceberg-spark-runtime-3.5_2.12-*.jar
 Notes:
 - By default the script will auto-select a compatible Spark 3.5 / Scala 2.12 `spark-sql` binary if `PATH` points to a different Spark line.
 - The script runs Spark using JDK 21 automatically on macOS when available. Override with `SPARK_JAVA_HOME` if needed.
+
+## Start Host-Side FDB in Docker
+
+Use these helpers when you want the host-side integration scripts to talk to a
+FoundationDB container directly. This is separate from `docker-compose` and
+forces the server to advertise `127.0.0.1:4550`, which is what local `fdbcli`
+and the integration scripts need on macOS.
+
+Start:
+
+```bash
+cd /Users/dlambrig/apple/foundationdb-iceberg
+./integration/start_fdb_docker.sh
+```
+
+Recreate:
+
+```bash
+./integration/start_fdb_docker.sh --replace
+```
+
+Stop:
+
+```bash
+./integration/stop_fdb_docker.sh
+```
+
+Stop and drop persisted data:
+
+```bash
+./integration/stop_fdb_docker.sh --delete-volume
+```
+
+Notes:
+- These scripts use a dedicated container (`fdb_integration`) and Docker volume
+  (`fdb_integration_data`) by default.
+- They also write the repo root `fdb.cluster` with `127.0.0.1:4550` for host-side use.
+- This is intentionally separate from the compose stack, which serves a different all-container workflow.
 
 Use already-running server on `:8181`:
 
