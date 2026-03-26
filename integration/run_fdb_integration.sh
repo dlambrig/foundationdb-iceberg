@@ -11,6 +11,7 @@ CONCURRENT_ITERATIONS="${CONCURRENT_ITERATIONS:-20}"
 MIXED_CONFLICT_ITERATIONS="${MIXED_CONFLICT_ITERATIONS:-12}"
 WRITE_CYCLE_ITERATIONS="${WRITE_CYCLE_ITERATIONS:-18}"
 SPARK_CONCURRENT_ITERATIONS="${SPARK_CONCURRENT_ITERATIONS:-2}"
+TRINO_CONCURRENT_ITERATIONS="${TRINO_CONCURRENT_ITERATIONS:-2}"
 
 START_SERVER=true
 RUN_SMOKE=true
@@ -675,6 +676,51 @@ run_trino_restart_checks() {
   run_trino_and_expect "Trino drop schema" "DROP SCHEMA iceberg.${trino_schema}" "^DROP SCHEMA$"
 }
 
+run_trino_concurrent_writer_checks() {
+  local trino_schema="trino_concurrent_${RUN_ID}"
+  local trino_table="orders"
+
+  echo "==> Concurrent Trino writer checks"
+  run_trino_and_expect "Trino concurrent create schema" "CREATE SCHEMA IF NOT EXISTS iceberg.${trino_schema}" "^CREATE SCHEMA|already exists"
+  run_trino_and_expect "Trino concurrent create table" "CREATE TABLE iceberg.${trino_schema}.${trino_table} (order_id BIGINT, amount DOUBLE)" "^CREATE TABLE$"
+
+  for ((i = 1; i <= TRINO_CONCURRENT_ITERATIONS; i++)); do
+    local base1 base2 writer1_sql writer2_sql writer1_log writer2_log pid1 pid2 status1 status2
+    base1=$(( (i - 1) * 200 + 1 ))
+    base2=$(( base1 + 100 ))
+    writer1_sql="INSERT INTO iceberg.${trino_schema}.${trino_table} SELECT n, CAST(n AS DOUBLE) FROM UNNEST(sequence(${base1}, $((base1 + 99)))) AS t(n)"
+    writer2_sql="INSERT INTO iceberg.${trino_schema}.${trino_table} SELECT n, CAST(n AS DOUBLE) FROM UNNEST(sequence(${base2}, $((base2 + 99)))) AS t(n)"
+    writer1_log="${LOG_DIR}/fdb_trino_concurrent_writer1_${RUN_ID}_${i}.log"
+    writer2_log="${LOG_DIR}/fdb_trino_concurrent_writer2_${RUN_ID}_${i}.log"
+
+    : > "${writer1_log}"
+    : > "${writer2_log}"
+    java -jar "${TRINO_CLI_JAR}" --server "${TRINO_SERVER_URL}" --output-format TSV_HEADER --execute "${writer1_sql}" >"${writer1_log}" 2>&1 &
+    pid1=$!
+    java -jar "${TRINO_CLI_JAR}" --server "${TRINO_SERVER_URL}" --output-format TSV_HEADER --execute "${writer2_sql}" >"${writer2_log}" 2>&1 &
+    pid2=$!
+
+    status1=0
+    status2=0
+    wait "${pid1}" || status1=$?
+    wait "${pid2}" || status2=$?
+
+    if [[ "${status1}" -ne 0 || "${status2}" -ne 0 ]]; then
+      echo "ERROR: Concurrent Trino writer iteration ${i} failed (statuses: ${status1}, ${status2})." >&2
+      echo "Writer logs:" >&2
+      echo "  ${writer1_log}" >&2
+      echo "  ${writer2_log}" >&2
+      exit 1
+    fi
+  done
+
+  local expected_rows=$((TRINO_CONCURRENT_ITERATIONS * 200))
+  run_trino_and_expect "Trino concurrent total rows" "SELECT count(*) AS c FROM iceberg.${trino_schema}.${trino_table}" "^[[:space:]]*${expected_rows}[[:space:]]*$"
+  run_trino_and_expect "Trino concurrent distinct rows" "SELECT count(DISTINCT order_id) AS c FROM iceberg.${trino_schema}.${trino_table}" "^[[:space:]]*${expected_rows}[[:space:]]*$"
+  run_trino_and_expect "Trino concurrent drop table" "DROP TABLE iceberg.${trino_schema}.${trino_table}" "^DROP TABLE$"
+  run_trino_and_expect "Trino concurrent drop schema" "DROP SCHEMA iceberg.${trino_schema}" "^DROP SCHEMA$"
+}
+
 require_fdb_prereqs() {
   local cluster_file="${PROJECT_ROOT}/fdb.cluster"
   if [[ ! -f "${cluster_file}" ]]; then
@@ -696,6 +742,14 @@ require_fdb_prereqs() {
 
   local status_output
   if ! status_output="$(fdbcli -C "${cluster_file}" --exec "status" 2>&1)"; then
+    echo "ERROR: FoundationDB is not reachable using ${cluster_file}." >&2
+    echo "Start FoundationDB first, then retry ./integration/run_fdb_integration.sh" >&2
+    echo "fdbcli output:" >&2
+    echo "${status_output}" >&2
+    exit 1
+  fi
+
+  if grep -Eqi "could not communicate with a quorum|unreachable|connection refused|timed out|database unavailable|no cluster file|operation failed" <<<"${status_output}"; then
     echo "ERROR: FoundationDB is not reachable using ${cluster_file}." >&2
     echo "Start FoundationDB first, then retry ./integration/run_fdb_integration.sh" >&2
     echo "fdbcli output:" >&2
@@ -971,6 +1025,7 @@ if [[ "${START_SERVER}" == "true" ]]; then
   fi
   if [[ "${RUN_TRINO}" == "true" ]]; then
     run_trino_restart_checks
+    run_trino_concurrent_writer_checks
   fi
   if [[ "${RUN_FLINK}" == "true" ]]; then
     run_flink_smoke_checks
